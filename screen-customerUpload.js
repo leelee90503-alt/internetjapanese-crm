@@ -1289,6 +1289,7 @@ export async function renderCustomerUpload(container, ctx) {
 
         // Customer: reuse the existing customer if flagged as a duplicate and confirmed by staff; otherwise create new
         let customerId = null;
+        let customerWasNewlyCreated = false;
         if (b.duplicate.suspect && b.linkToExisting && b.duplicate.matchedCustomerId) {
           customerId = b.duplicate.matchedCustomerId;
         } else {
@@ -1299,41 +1300,54 @@ export async function renderCustomerUpload(container, ctx) {
             .single();
           if (custErr) throw custErr;
           customerId = newCust.id;
+          customerWasNewlyCreated = true;
         }
 
-        // Order
-        const { data: newOrder, error: orderErr } = await supabase
-          .from("orders")
-          .insert({
-            customer_id: customerId,
-            salesperson_id: salespersonId,
-            order_date: b.orderDate,
-            pipeline_stage: "confirmed",
-            created_by: ctx.profile.id,
-            source_order_id: b.sourceOrderId ?? null,
-            order_number: b.orderNumber ?? null,
-            category: b.category ?? null,
-          })
-          .select()
-          .single();
-        if (orderErr) throw orderErr;
+        try {
+          // Order
+          const { data: newOrder, error: orderErr } = await supabase
+            .from("orders")
+            .insert({
+              customer_id: customerId,
+              salesperson_id: salespersonId,
+              order_date: b.orderDate,
+              pipeline_stage: "confirmed",
+              created_by: ctx.profile.id,
+              source_order_id: b.sourceOrderId ?? null,
+              order_number: b.orderNumber ?? null,
+              category: b.category ?? null,
+            })
+            .select()
+            .single();
+          if (orderErr) throw orderErr;
 
-        const lineRows = nonDupLines.map((l) => ({
-          order_id: newOrder.id,
-          service_id: l.serviceId || null,
-          provider_id: l.providerId || null,
-          plan_name: l.planName ?? null,
-          account_number: l.accountNumber || null,
-          expected_commission: l.expectedCommission,
-          units: l.units ?? null,
-          units_installed: l.unitsInstalled ?? null,
-          mobile_lines_ordered: l.mobileLinesOrdered ?? null,
-          mobile_lines_installed: l.mobileLinesInstalled ?? null,
-          status: "pending",
-        }));
-        if (lineRows.length > 0) {
-          const { error: lineErr } = await supabase.from("order_service_lines").insert(lineRows);
-          if (lineErr) throw lineErr;
+          const lineRows = nonDupLines.map((l) => ({
+            order_id: newOrder.id,
+            service_id: l.serviceId || null,
+            provider_id: l.providerId || null,
+            plan_name: l.planName ?? null,
+            account_number: l.accountNumber || null,
+            expected_commission: l.expectedCommission,
+            units: l.units ?? null,
+            units_installed: l.unitsInstalled ?? null,
+            mobile_lines_ordered: l.mobileLinesOrdered ?? null,
+            mobile_lines_installed: l.mobileLinesInstalled ?? null,
+            status: "pending",
+          }));
+          if (lineRows.length > 0) {
+            const { error: lineErr } = await supabase.from("order_service_lines").insert(lineRows);
+            if (lineErr) throw lineErr;
+          }
+        } catch (innerErr) {
+          // If the order (or its lines) fails to save after the customer was
+          // newly created, roll the customer back too -- otherwise a
+          // transient failure here (e.g. a dropped connection) leaves an
+          // orphan customer with no order behind, invisible to the
+          // Customers/Orders screen's old orders-only view.
+          if (customerWasNewlyCreated) {
+            await supabase.from("customers").delete().eq("id", customerId);
+          }
+          throw innerErr;
         }
 
         successCount++;

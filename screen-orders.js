@@ -11,42 +11,64 @@ function commissionBadge(status) {
 export async function renderOrders(container, ctx) {
   const isAdmin = ctx.profile?.role === "admin";
   let search = "";
-  let orders = [];
+  let customers = [];
   let selected = new Set();
-  let detailOrderId = null;
+  let detailKey = null;
   let detailNotes = [];
   let detailBusy = false;
   let noteBusy = false;
 
+  // The list is built from `customers` (not `orders`) so that a customer
+  // saved without a successful order/line save (e.g. a dropped connection
+  // mid-upload) still shows up and can be reviewed or deleted, instead of
+  // being invisible on this screen while still counted on the Dashboard.
   async function load() {
-    let query = supabase
-      .from("orders")
+    const { data, error } = await supabase
+      .from("customers")
       .select(
-        `id, order_date, pipeline_stage, memo, source_order_id, order_number, category, created_at,
-         customers(id, name, phone, address, email),
-         salespeople(id, name),
-         order_service_lines(id, account_number, expected_commission, actual_commission_amount, status,
-           units, units_installed, mobile_lines_ordered, mobile_lines_installed, plan_name,
-           services(id, name), providers(id, name))`
+        `id, name, phone, address, email, created_at,
+         orders(id, order_date, pipeline_stage, memo, source_order_id, order_number, category,
+           salespeople(id, name),
+           order_service_lines(id, account_number, expected_commission, actual_commission_amount, status,
+             units, units_installed, mobile_lines_ordered, mobile_lines_installed, plan_name,
+             services(id, name), providers(id, name)))`
       )
-      .order("order_date", { ascending: false });
-    const { data, error } = await query;
+      .order("created_at", { ascending: false });
     if (error) {
       container.innerHTML = `<div class="alert error">Failed to load: ${escapeHtml(error.message)}</div>`;
+      customers = [];
       return;
     }
-    orders = data || [];
+    customers = data || [];
+  }
+
+  // One row per order; customers with zero orders get a single placeholder
+  // row (order: null) so they're still visible/selectable/deletable.
+  function buildRows() {
+    const out = [];
+    for (const c of customers) {
+      const orders = (c.orders || []).slice().sort((a, b) => (b.order_date || "").localeCompare(a.order_date || ""));
+      if (orders.length === 0) {
+        out.push({ rowKey: `c:${c.id}`, customer: c, order: null });
+      } else {
+        for (const o of orders) {
+          out.push({ rowKey: `o:${o.id}`, customer: c, order: o });
+        }
+      }
+    }
+    return out;
   }
 
   function filtered() {
-    if (!search.trim()) return orders;
+    const rows = buildRows();
+    if (!search.trim()) return rows;
     const q = search.trim().toLowerCase();
-    return orders.filter(
-      (o) =>
-        (o.customers?.name || "").toLowerCase().includes(q) ||
-        (o.customers?.phone || "").toLowerCase().includes(q) ||
-        (o.salespeople?.name || "").toLowerCase().includes(q) ||
-        o.order_service_lines?.some((l) => (l.account_number || "").toLowerCase().includes(q))
+    return rows.filter(
+      (r) =>
+        (r.customer.name || "").toLowerCase().includes(q) ||
+        (r.customer.phone || "").toLowerCase().includes(q) ||
+        (r.order?.salespeople?.name || "").toLowerCase().includes(q) ||
+        r.order?.order_service_lines?.some((l) => (l.account_number || "").toLowerCase().includes(q))
     );
   }
 
@@ -63,11 +85,12 @@ export async function renderOrders(container, ctx) {
     detailNotes = error ? [] : data || [];
   }
 
-  function detailModalHtml() {
-    if (!detailOrderId) return "";
-    const o = orders.find((x) => x.id === detailOrderId);
-    if (!o) return "";
-    const c = o.customers || {};
+  function detailModalHtml(rows) {
+    if (!detailKey) return "";
+    const row = rows.find((r) => r.rowKey === detailKey);
+    if (!row) return "";
+    const c = row.customer;
+    const o = row.order;
     return `
       <div class="modal-overlay" id="detail-overlay">
         <div class="modal-card">
@@ -79,13 +102,18 @@ export async function renderOrders(container, ctx) {
             <div><span class="muted">Phone</span><div>${escapeHtml(c.phone || "-")}</div></div>
             <div><span class="muted">Email</span><div>${escapeHtml(c.email || "-")}</div></div>
             <div><span class="muted">Address</span><div>${escapeHtml(c.address || "-")}</div></div>
-            <div><span class="muted">Order Date</span><div>${escapeHtml(o.order_date || "-")}</div></div>
-            <div><span class="muted">Salesperson</span><div>${escapeHtml(o.salespeople?.name || "-")}</div></div>
-            <div><span class="muted">Status</span><div>${escapeHtml(o.pipeline_stage || "-")}</div></div>
-            <div><span class="muted">Order Id (source)</span><div>${escapeHtml(o.source_order_id || "-")}</div></div>
-            <div><span class="muted">Order Number / Work Order</span><div>${escapeHtml(o.order_number || "-")}</div></div>
-            <div><span class="muted">Category</span><div>${escapeHtml(o.category || "-")}</div></div>
+            <div><span class="muted">Order Date</span><div>${escapeHtml(o?.order_date || "-")}</div></div>
+            <div><span class="muted">Salesperson</span><div>${escapeHtml(o?.salespeople?.name || "-")}</div></div>
+            <div><span class="muted">Status</span><div>${o ? escapeHtml(o.pipeline_stage || "-") : `<span class="badge neutral">No Orders</span>`}</div></div>
+            <div><span class="muted">Order Id (source)</span><div>${escapeHtml(o?.source_order_id || "-")}</div></div>
+            <div><span class="muted">Order Number / Work Order</span><div>${escapeHtml(o?.order_number || "-")}</div></div>
+            <div><span class="muted">Category</span><div>${escapeHtml(o?.category || "-")}</div></div>
           </div>
+          ${
+            !o
+              ? `<div class="alert error" style="margin-top:10px">This customer has no saved order. This usually means the order/service-line save failed after the customer record was created (e.g. a dropped connection during upload). Delete this customer and re-upload, or contact an admin to investigate.</div>`
+              : ""
+          }
 
           <h4>Service Lines</h4>
           <table class="data-table small">
@@ -94,7 +122,7 @@ export async function renderOrders(container, ctx) {
             </thead>
             <tbody>
               ${
-                (o.order_service_lines || [])
+                (o?.order_service_lines || [])
                   .map(
                     (l) => `
                 <tr>
@@ -144,11 +172,17 @@ export async function renderOrders(container, ctx) {
 
   function draw() {
     const rows = filtered();
-    const allSelected = rows.length > 0 && rows.every((o) => selected.has(o.id));
+    const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.rowKey));
+    const orphanCount = rows.filter((r) => !r.order).length;
     container.innerHTML = `
       <div class="screen">
         <h2>Customers / Orders</h2>
         <p class="muted">All staff can view all customer/order data. Click a row to see full details and notes. (Commission-related screens are admin-only)</p>
+        ${
+          orphanCount > 0
+            ? `<div class="alert error">${orphanCount} customer(s) have no saved order (shown with a "No Orders" badge below) -- their order/service-line save likely failed after the customer record was created. Review and delete or re-upload as needed.</div>`
+            : ""
+        }
         <input type="text" id="search" placeholder="Search by name/phone/salesperson/account number" value="${escapeHtml(search)}" />
         ${
           isAdmin
@@ -170,26 +204,28 @@ export async function renderOrders(container, ctx) {
             ${
               rows
                 .map(
-                  (o) => `
-              <tr data-order-row="${o.id}" class="clickable-row">
-                ${isAdmin ? `<td><input type="checkbox" class="row-select" data-id="${o.id}" ${selected.has(o.id) ? "checked" : ""} /></td>` : ""}
-                <td>${o.order_date || "-"}</td>
-                <td>${escapeHtml(o.customers?.name || "-")}</td>
-                <td>${escapeHtml(o.customers?.phone || "-")}</td>
-                <td>${escapeHtml(o.salespeople?.name || "-")}</td>
-                <td>${(o.order_service_lines || [])
-                  .map(
-                    (l) =>
-                      `${escapeHtml(l.services?.name || "?")}/${escapeHtml(l.providers?.name || "?")}${
-                        l.account_number ? " (" + escapeHtml(l.account_number) + ")" : ""
-                      }`
-                  )
-                  .join(", ") || "-"}</td>
-                <td>${escapeHtml(o.pipeline_stage)}</td>
+                  (r) => `
+              <tr data-row-key="${r.rowKey}" class="clickable-row ${!r.order ? "needs-review-row" : ""}">
+                ${isAdmin ? `<td><input type="checkbox" class="row-select" data-id="${r.rowKey}" ${selected.has(r.rowKey) ? "checked" : ""} /></td>` : ""}
+                <td>${r.order?.order_date || "-"}</td>
+                <td>${escapeHtml(r.customer.name || "-")}</td>
+                <td>${escapeHtml(r.customer.phone || "-")}</td>
+                <td>${escapeHtml(r.order?.salespeople?.name || "-")}</td>
+                <td>${
+                  (r.order?.order_service_lines || [])
+                    .map(
+                      (l) =>
+                        `${escapeHtml(l.services?.name || "?")}/${escapeHtml(l.providers?.name || "?")}${
+                          l.account_number ? " (" + escapeHtml(l.account_number) + ")" : ""
+                        }`
+                    )
+                    .join(", ") || "-"
+                }</td>
+                <td>${r.order ? escapeHtml(r.order.pipeline_stage) : `<span class="badge warn">No Orders</span>`}</td>
                 ${
                   isAdmin
                     ? `<td>${
-                        (o.order_service_lines || [])
+                        (r.order?.order_service_lines || [])
                           .map(
                             (l) =>
                               `${commissionBadge(l.status)} ${fmtMoney(l.actual_commission_amount)} / exp. ${fmtMoney(l.expected_commission)}`
@@ -205,7 +241,7 @@ export async function renderOrders(container, ctx) {
           </tbody>
         </table>
       </div>
-      ${detailModalHtml()}
+      ${detailModalHtml(rows)}
     `;
 
     container.querySelector("#search").addEventListener("input", (e) => {
@@ -215,8 +251,8 @@ export async function renderOrders(container, ctx) {
 
     if (isAdmin) {
       container.querySelector("#select-all")?.addEventListener("change", (e) => {
-        if (e.target.checked) rows.forEach((o) => selected.add(o.id));
-        else rows.forEach((o) => selected.delete(o.id));
+        if (e.target.checked) rows.forEach((r) => selected.add(r.rowKey));
+        else rows.forEach((r) => selected.delete(r.rowKey));
         draw();
       });
       container.querySelectorAll(".row-select").forEach((cb) => {
@@ -230,44 +266,44 @@ export async function renderOrders(container, ctx) {
       });
       container.querySelector("#delete-selected-btn")?.addEventListener("click", async () => {
         if (selected.size === 0) return;
-        const ok = confirm(`Delete ${selected.size} selected order(s)? This cannot be undone.`);
+        const ok = confirm(`Delete ${selected.size} selected row(s)? This cannot be undone.`);
         if (!ok) return;
-        await deleteOrders(Array.from(selected));
+        await deleteRows(Array.from(selected));
       });
       container.querySelector("#delete-all-btn")?.addEventListener("click", async () => {
         if (rows.length === 0) return;
-        const ok = confirm(`Delete ALL ${rows.length} order(s) currently shown? This cannot be undone.`);
+        const ok = confirm(`Delete ALL ${rows.length} row(s) currently shown? This cannot be undone.`);
         if (!ok) return;
-        await deleteOrders(rows.map((o) => o.id));
+        await deleteRows(rows.map((r) => r.rowKey));
       });
     }
 
-    container.querySelectorAll("tr[data-order-row]").forEach((tr) => {
+    container.querySelectorAll("tr[data-row-key]").forEach((tr) => {
       tr.addEventListener("click", async () => {
-        detailOrderId = tr.dataset.orderRow;
+        detailKey = tr.dataset.rowKey;
         detailBusy = true;
         draw();
-        const o = orders.find((x) => x.id === detailOrderId);
-        await loadNotesFor(o?.customers?.id);
+        const row = rows.find((r) => r.rowKey === detailKey);
+        await loadNotesFor(row?.customer?.id);
         detailBusy = false;
         draw();
       });
     });
 
-    wireDetailModal();
+    wireDetailModal(rows);
   }
 
-  function wireDetailModal() {
+  function wireDetailModal(rows) {
     const overlay = container.querySelector("#detail-overlay");
     if (!overlay) return;
     overlay.addEventListener("click", (e) => {
       if (e.target === overlay) {
-        detailOrderId = null;
+        detailKey = null;
         draw();
       }
     });
     container.querySelector("#detail-close-btn")?.addEventListener("click", () => {
-      detailOrderId = null;
+      detailKey = null;
       draw();
     });
     container.querySelector(".modal-card")?.addEventListener("click", (e) => e.stopPropagation());
@@ -275,8 +311,8 @@ export async function renderOrders(container, ctx) {
       const input = container.querySelector("#note-input");
       const text = input.value.trim();
       if (!text) return;
-      const o = orders.find((x) => x.id === detailOrderId);
-      const customerId = o?.customers?.id;
+      const row = rows.find((r) => r.rowKey === detailKey);
+      const customerId = row?.customer?.id;
       if (!customerId) return;
       noteBusy = true;
       draw();
@@ -296,14 +332,30 @@ export async function renderOrders(container, ctx) {
     });
   }
 
-  async function deleteOrders(ids) {
-    const { error } = await supabase.from("orders").delete().in("id", ids);
-    if (error) {
-      alert("Failed to delete: " + error.message);
-      return;
+  // rowKeys look like "o:<orderId>" or "c:<customerId>" (a customer with no
+  // order). Order rows delete via the orders table (cascades its lines);
+  // customer-only rows delete via the customers table directly.
+  async function deleteRows(rowKeys) {
+    const orderIds = rowKeys.filter((k) => k.startsWith("o:")).map((k) => k.slice(2));
+    const customerIds = rowKeys.filter((k) => k.startsWith("c:")).map((k) => k.slice(2));
+
+    if (orderIds.length > 0) {
+      const { error } = await supabase.from("orders").delete().in("id", orderIds);
+      if (error) {
+        alert("Failed to delete: " + error.message);
+        return;
+      }
     }
+    if (customerIds.length > 0) {
+      const { error } = await supabase.from("customers").delete().in("id", customerIds);
+      if (error) {
+        alert("Failed to delete: " + error.message);
+        return;
+      }
+    }
+
     selected.clear();
-    if (detailOrderId && ids.includes(detailOrderId)) detailOrderId = null;
+    if (detailKey && rowKeys.includes(detailKey)) detailKey = null;
     await load();
     draw();
   }
