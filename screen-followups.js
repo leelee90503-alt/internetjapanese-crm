@@ -115,7 +115,8 @@ export async function renderFollowups(container, ctx) {
                  <button class="btn small" data-postpone="${f.id}">Postpone</button>`
               : `<span class="muted">Completed${
                   f.completed_at ? " " + escapeHtml(new Date(f.completed_at).toLocaleDateString()) : ""
-                }</span>`
+                }</span>
+                 <button class="btn small" data-reopen="${f.id}">Reopen</button>`
           }
         </td>
       </tr>
@@ -303,6 +304,22 @@ export async function renderFollowups(container, ctx) {
           .eq("id", id);
         if (error) {
           alert("Failed to complete: " + error.message);
+          return;
+        }
+        await load();
+        draw();
+      });
+    });
+
+    container.querySelectorAll("[data-reopen]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.reopen;
+        const { error } = await supabase
+          .from("follow_ups")
+          .update({ status: "pending", completed_at: null, completed_by: null })
+          .eq("id", id);
+        if (error) {
+          alert("Failed to reopen: " + error.message);
           return;
         }
         await load();
