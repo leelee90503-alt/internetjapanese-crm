@@ -1,16 +1,18 @@
 <!doctype html>
-<html lang="ko">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>고객관리 시스템 (CRM)</title>
+  <title>Customer Management System (CRM)</title>
   <link rel="stylesheet" href="./style.css" />
   <!--
-    이 앱은 별도 빌드 과정(npm install / vite build) 없이 브라우저에서 바로 실행되는
-    순수 정적(static) 웹 앱입니다. React 없이 순수 JavaScript(ES 모듈)로 작성했고,
-    Supabase JS SDK와 엑셀 파싱 라이브러리(xlsx)는 아래 importmap을 통해 CDN에서 불러옵니다.
-    로컬에서 열 때는 파일을 더블클릭하지 말고 반드시 간단한 로컬 서버로 열어주세요.
-    (예: 이 폴더에서 `python3 -m http.server 8080` 실행 후 http://localhost:8080 접속)
+    This app runs directly in the browser with no build step (no npm install /
+    vite build). It's written in plain JavaScript (ES modules) instead of
+    React. The Supabase JS SDK and the Excel parsing library (xlsx) are
+    loaded from a CDN via the importmap below.
+    When opening locally, don't double-click the file — serve it with a
+    simple local server (e.g. run `python3 -m http.server 8080` in this
+    folder, then open http://localhost:8080).
   -->
   <script type="importmap">
     {
@@ -22,7 +24,7 @@
   </script>
 </head>
 <body>
-  <div id="app">불러오는 중...</div>
+  <div id="app">Loading...</div>
   <script type="module" src="./app.js"></script>
 </body>
 </html>

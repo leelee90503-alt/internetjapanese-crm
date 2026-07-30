@@ -2,14 +2,14 @@ import { supabase } from "./supabaseClient.js";
 import { escapeHtml } from "./normalize.js";
 
 const TABS = [
-  { key: "services", table: "services", label: "서비스 상품", extra: [] },
+  { key: "services", table: "services", label: "Services", extra: [] },
   {
     key: "providers",
     table: "providers",
-    label: "프로바이더",
-    extra: [{ key: "has_commission_report", label: "커미션 리포트 제공", type: "checkbox" }],
+    label: "Providers",
+    extra: [{ key: "has_commission_report", label: "Provides Commission Report", type: "checkbox" }],
   },
-  { key: "salespeople", table: "salespeople", label: "세일즈 담당자", extra: [] },
+  { key: "salespeople", table: "salespeople", label: "Salespeople", extra: [] },
 ];
 
 export async function renderMasterData(container, ctx) {
@@ -20,9 +20,9 @@ export async function renderMasterData(container, ctx) {
     const tab = TABS.find((t) => t.key === activeTab);
     container.innerHTML = `
       <div class="screen">
-        <h2>마스터 데이터 관리</h2>
-        <p class="muted">서비스 상품 / 프로바이더 / 세일즈 담당자를 관리합니다. ${
-          isAdmin ? "" : "(일반 직원은 조회만 가능합니다)"
+        <h2>Master Data Management</h2>
+        <p class="muted">Manage Services / Providers / Salespeople. ${
+          isAdmin ? "" : "(Staff can view only)"
         }</p>
         <div class="tabs">
           ${TABS.map(
@@ -30,7 +30,7 @@ export async function renderMasterData(container, ctx) {
               `<button data-tab="${t.key}" class="${t.key === activeTab ? "tab active" : "tab"}">${t.label}</button>`
           ).join("")}
         </div>
-        <div id="tab-body">불러오는 중...</div>
+        <div id="tab-body">Loading...</div>
       </div>
     `;
     TABS.forEach((t) => {
@@ -50,14 +50,14 @@ export async function renderMasterData(container, ctx) {
       .order("created_at", { ascending: true });
 
     if (error) {
-      body.innerHTML = `<div class="alert error">불러오기 실패: ${escapeHtml(error.message)}</div>`;
+      body.innerHTML = `<div class="alert error">Failed to load: ${escapeHtml(error.message)}</div>`;
       return;
     }
 
     body.innerHTML = `
       ${isAdmin ? `
       <form id="add-form" class="inline-form">
-        <input type="text" name="name" placeholder="${tab.label} 이름 추가" required />
+        <input type="text" name="name" placeholder="Add a new ${tab.label} name" required />
         ${tab.extra
           .map((f) =>
             f.type === "checkbox"
@@ -65,15 +65,15 @@ export async function renderMasterData(container, ctx) {
               : ""
           )
           .join("")}
-        <button type="submit" class="btn primary">추가</button>
+        <button type="submit" class="btn primary">Add</button>
       </form>` : ""}
       <table class="data-table">
         <thead>
           <tr>
-            <th>이름</th>
+            <th>Name</th>
             ${tab.extra.map((f) => `<th>${f.label}</th>`).join("")}
-            <th>사용여부</th>
-            ${isAdmin ? "<th>관리</th>" : ""}
+            <th>Active</th>
+            ${isAdmin ? "<th>Actions</th>" : ""}
           </tr>
         </thead>
         <tbody>
@@ -98,11 +98,11 @@ export async function renderMasterData(container, ctx) {
               <td><input type="checkbox" class="edit-active" ${row.is_active ? "checked" : ""} ${
                 isAdmin ? "" : "disabled"
               } /></td>
-              ${isAdmin ? `<td><button class="btn small save-row">저장</button></td>` : ""}
+              ${isAdmin ? `<td><button class="btn small save-row">Save</button></td>` : ""}
             </tr>
           `
             )
-            .join("") || `<tr><td colspan="8" class="muted">데이터가 없습니다.</td></tr>`}
+            .join("") || `<tr><td colspan="8" class="muted">No data.</td></tr>`}
         </tbody>
       </table>
     `;
@@ -117,7 +117,7 @@ export async function renderMasterData(container, ctx) {
         });
         const { error: insErr } = await supabase.from(tab.table).insert(payload);
         if (insErr) {
-          alert("추가 실패: " + insErr.message);
+          alert("Failed to add: " + insErr.message);
           return;
         }
         await drawTabBody(tab);
@@ -134,7 +134,7 @@ export async function renderMasterData(container, ctx) {
           payload.is_active = tr.querySelector(".edit-active").checked;
           const { error: updErr } = await supabase.from(tab.table).update(payload).eq("id", id);
           if (updErr) {
-            alert("저장 실패: " + updErr.message);
+            alert("Failed to save: " + updErr.message);
             return;
           }
           await drawTabBody(tab);

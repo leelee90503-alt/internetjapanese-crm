@@ -9,24 +9,24 @@ import {
 } from "./normalize.js";
 
 const FIELD_DEFS = [
-  { key: "name", label: "이름", guesses: ["name", "이름", "고객명", "customer"] },
-  { key: "phone", label: "전화번호", guesses: ["phone", "전화", "연락처", "tel"] },
+  { key: "name", label: "Name", guesses: ["name", "이름", "고객명", "customer"] },
+  { key: "phone", label: "Phone", guesses: ["phone", "전화", "연락처", "tel"] },
   {
     key: "account_number",
-    label: "계정번호",
+    label: "Account Number",
     guesses: ["account", "acc", "계정번호", "계정"],
   },
-  { key: "order_date", label: "오더날짜", guesses: ["date", "날짜", "가입일", "order date"] },
-  { key: "provider", label: "프로바이더", guesses: ["provider", "프로바이더", "carrier"] },
-  { key: "service", label: "서비스/상품", guesses: ["service", "plan", "서비스", "상품"] },
+  { key: "order_date", label: "Order Date", guesses: ["date", "날짜", "가입일", "order date"] },
+  { key: "provider", label: "Provider", guesses: ["provider", "프로바이더", "carrier"] },
+  { key: "service", label: "Service / Plan", guesses: ["service", "plan", "서비스", "상품"] },
   {
     key: "salesperson",
-    label: "세일즈 담당자",
+    label: "Salesperson",
     guesses: ["sales", "세일즈", "담당자", "sold by", "sale by"],
   },
   {
     key: "expected_commission",
-    label: "예상 커미션",
+    label: "Expected Commission",
     guesses: ["commission", "커미션", "amount", "금액"],
   },
 ];
@@ -60,8 +60,8 @@ export async function renderCustomerUpload(container, ctx) {
   function drawUploadStep() {
     container.innerHTML = `
       <div class="screen">
-        <h2>고객 정보 엑셀 업로드</h2>
-        <p class="muted">엑셀(.xlsx/.csv) 파일을 업로드하면, 컬럼 매핑 → 검토·확인(컨펌) 단계를 거쳐 정식 고객·오더 데이터로 저장됩니다.</p>
+        <h2>Customer Excel Upload</h2>
+        <p class="muted">Upload an Excel (.xlsx/.csv) file. It will go through column mapping and a review/confirm step before being saved as real customer and order data.</p>
         <div class="card">
           <input type="file" id="file-input" accept=".xlsx,.xls,.csv" />
         </div>
@@ -98,16 +98,16 @@ export async function renderCustomerUpload(container, ctx) {
   function drawMappingStep() {
     container.innerHTML = `
       <div class="screen">
-        <h2>2단계: 컬럼 매핑 및 검증</h2>
+        <h2>Step 2: Column Mapping &amp; Validation</h2>
         <div class="card">
-          <label>시트 선택
+          <label>Select Sheet
             <select id="sheet-select">
               ${sheetNames.map((n) => `<option value="${escapeHtml(n)}" ${n === selectedSheet ? "selected" : ""}>${escapeHtml(n)}</option>`).join("")}
             </select>
           </label>
-          <p class="muted">감지된 컬럼(${headers.length}개) / 데이터 행 ${dataRows.length}개. 아래에서 각 시스템 필드가 어느 컬럼에 해당하는지 확인·수정하세요.</p>
+          <p class="muted">Detected ${headers.length} column(s) / ${dataRows.length} data row(s). Check and adjust which column maps to each system field below.</p>
           <table class="data-table">
-            <thead><tr><th>시스템 필드</th><th>엑셀 컬럼</th></tr></thead>
+            <thead><tr><th>System Field</th><th>Excel Column</th></tr></thead>
             <tbody>
               ${FIELD_DEFS.map(
                 (f) => `
@@ -115,11 +115,11 @@ export async function renderCustomerUpload(container, ctx) {
                   <td>${f.label}</td>
                   <td>
                     <select data-field="${f.key}">
-                      <option value="-1" ${mapping[f.key] === -1 || mapping[f.key] === undefined ? "selected" : ""}>(사용 안 함)</option>
+                      <option value="-1" ${mapping[f.key] === -1 || mapping[f.key] === undefined ? "selected" : ""}>(Not used)</option>
                       ${headers
                         .map(
                           (h, i) =>
-                            `<option value="${i}" ${mapping[f.key] === i ? "selected" : ""}>${escapeHtml(h) || "(제목없음 " + i + ")"}</option>`
+                            `<option value="${i}" ${mapping[f.key] === i ? "selected" : ""}>${escapeHtml(h) || "(untitled " + i + ")"}</option>`
                         )
                         .join("")}
                     </select>
@@ -128,15 +128,15 @@ export async function renderCustomerUpload(container, ctx) {
               ).join("")}
             </tbody>
           </table>
-          <label>프로바이더 컬럼이 없거나 비어있는 행의 기본 프로바이더
+          <label>Default provider for rows with no/empty provider column
             <select id="default-provider">
-              <option value="">(지정 안 함)</option>
+              <option value="">(Not set)</option>
               ${providers.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("")}
             </select>
           </label>
           <div class="btn-row">
-            <button class="btn" id="back-btn">다시 업로드</button>
-            <button class="btn primary" id="next-btn">다음: 검토·확인</button>
+            <button class="btn" id="back-btn">Re-upload</button>
+            <button class="btn primary" id="next-btn">Next: Review &amp; Confirm</button>
           </div>
         </div>
       </div>
@@ -190,7 +190,7 @@ export async function renderCustomerUpload(container, ctx) {
         };
         blocks.push(current);
       }
-      if (!current) continue; // 이름 없는 행이 첫 행일 경우(형식 오류) 건너뜀
+      if (!current) continue; // skip rows with no name if they appear before any block starts (formatting error)
       const providerRaw = String(cell(row, "provider") ?? "").trim();
       const provider = matchMaster(providers, providerRaw) || (defaultProviderId || null);
       const service = matchMaster(services, String(cell(row, "service") ?? "").trim());
@@ -205,7 +205,7 @@ export async function renderCustomerUpload(container, ctx) {
       });
     }
 
-    // 중복 의심 검사 (이름+전화번호+계정번호 조합, 오더날짜는 기준에서 제외)
+    // Duplicate-suspect check (name + phone + account number combination; order date is excluded from the criteria)
     for (const b of blocks) {
       const firstAccount = b.lines[0]?.accountNumber || "";
       const res = await checkDuplicateSuspect({
@@ -239,16 +239,16 @@ export async function renderCustomerUpload(container, ctx) {
   function drawReviewStep() {
     container.innerHTML = `
       <div class="screen">
-        <h2>3단계: 검토·확인(컨펌)</h2>
-        <p class="muted">고객 블록별로 값을 확인·수정하고, "중복 의심" 표시가 있으면 직접 비교해서 실제 중복인지 판단하세요. 문제 없는 항목만 선택되어 있으면 됩니다.</p>
+        <h2>Step 3: Review &amp; Confirm</h2>
+        <p class="muted">Check and edit values for each customer block. If a "Possible Duplicate" badge appears, compare it yourself and decide whether it's really a duplicate. Only entries you want saved need to stay checked.</p>
         ${salespersonDatalist()}
         <div class="btn-row">
-          <button class="btn" id="add-block-btn">+ 고객 수동 추가</button>
-          <button class="btn primary" id="confirm-btn">선택한 고객 확인(컨펌)</button>
-          <button class="btn" id="back-to-mapping-btn">뒤로(컬럼 매핑)</button>
+          <button class="btn" id="add-block-btn">+ Add Customer Manually</button>
+          <button class="btn primary" id="confirm-btn">Confirm Selected Customers</button>
+          <button class="btn" id="back-to-mapping-btn">Back (Column Mapping)</button>
         </div>
         ${busyMsg ? `<div class="alert info">${escapeHtml(busyMsg)}</div>` : ""}
-        <div id="blocks-wrap">${blocks.map((b) => blockCardHtml(b)).join("") || `<p class="muted">불러온 고객 데이터가 없습니다.</p>`}</div>
+        <div id="blocks-wrap">${blocks.map((b) => blockCardHtml(b)).join("") || `<p class="muted">No customer data was loaded.</p>`}</div>
       </div>
     `;
     wireReviewEvents();
@@ -258,28 +258,28 @@ export async function renderCustomerUpload(container, ctx) {
     return `
     <div class="card block-card ${b.excluded ? "excluded" : ""}" data-block="${b.id}">
       <div class="block-head">
-        <label class="checkbox-inline"><input type="checkbox" class="b-include" ${b.excluded ? "" : "checked"} /> 이 고객 포함</label>
+        <label class="checkbox-inline"><input type="checkbox" class="b-include" ${b.excluded ? "" : "checked"} /> Include this customer</label>
         ${
           b.duplicate.suspect
-            ? `<span class="badge warn">중복 의심: ${escapeHtml(b.duplicate.reason)}${
-                b.duplicate.matchedCustomerLabel ? " → 기존: " + escapeHtml(b.duplicate.matchedCustomerLabel) : ""
+            ? `<span class="badge warn">Possible duplicate: ${escapeHtml(b.duplicate.reason)}${
+                b.duplicate.matchedCustomerLabel ? " &rarr; existing: " + escapeHtml(b.duplicate.matchedCustomerLabel) : ""
               }</span>`
             : ""
         }
       </div>
       ${
         b.duplicate.suspect
-          ? `<label class="checkbox-inline"><input type="checkbox" class="b-link-existing" ${b.linkToExisting ? "checked" : ""} /> 기존 고객과 동일 건으로 처리(신규 등록하지 않음)</label>`
+          ? `<label class="checkbox-inline"><input type="checkbox" class="b-link-existing" ${b.linkToExisting ? "checked" : ""} /> Treat as the same as the existing customer (don't create a new one)</label>`
           : ""
       }
       <div class="grid4">
-        <label>이름<input type="text" class="b-name" value="${escapeHtml(b.name)}" /></label>
-        <label>전화번호<input type="text" class="b-phone" value="${escapeHtml(b.phone)}" /></label>
-        <label>오더날짜<input type="date" class="b-date" value="${b.orderDate || ""}" /></label>
-        <label>세일즈 담당자<input type="text" class="b-sales" list="sp-list" value="${escapeHtml(b.salesperson)}" /></label>
+        <label>Name<input type="text" class="b-name" value="${escapeHtml(b.name)}" /></label>
+        <label>Phone<input type="text" class="b-phone" value="${escapeHtml(b.phone)}" /></label>
+        <label>Order Date<input type="date" class="b-date" value="${b.orderDate || ""}" /></label>
+        <label>Salesperson<input type="text" class="b-sales" list="sp-list" value="${escapeHtml(b.salesperson)}" /></label>
       </div>
       <table class="data-table small">
-        <thead><tr><th>포함</th><th>서비스</th><th>프로바이더</th><th>계정번호</th><th>예상 커미션</th><th></th></tr></thead>
+        <thead><tr><th>Include</th><th>Service</th><th>Provider</th><th>Account #</th><th>Expected Commission</th><th></th></tr></thead>
         <tbody>
           ${b.lines
             .map(
@@ -287,22 +287,22 @@ export async function renderCustomerUpload(container, ctx) {
             <tr data-line="${l.id}">
               <td><input type="checkbox" class="l-include" ${l.excluded ? "" : "checked"} /></td>
               <td><select class="l-service">
-                <option value="">(선택)</option>
+                <option value="">(Select)</option>
                 ${services.map((s) => `<option value="${s.id}" ${l.serviceId === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}
               </select></td>
               <td><select class="l-provider">
-                <option value="">(선택)</option>
+                <option value="">(Select)</option>
                 ${providers.map((p) => `<option value="${p.id}" ${l.providerId === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
               </select></td>
               <td><input type="text" class="l-account" value="${escapeHtml(l.accountNumber)}" /></td>
               <td><input type="number" step="0.01" class="l-commission" value="${l.expectedCommission ?? ""}" /></td>
-              <td><button class="btn small danger l-remove">삭제</button></td>
+              <td><button class="btn small danger l-remove">Delete</button></td>
             </tr>`
             )
             .join("")}
         </tbody>
       </table>
-      <button class="btn small b-add-line">+ 서비스 항목 추가</button>
+      <button class="btn small b-add-line">+ Add Service Line</button>
     </div>`;
   }
 
@@ -394,10 +394,10 @@ export async function renderCustomerUpload(container, ctx) {
   async function confirmBlocks() {
     const toConfirm = blocks.filter((b) => !b.excluded);
     if (toConfirm.length === 0) {
-      alert("포함된 고객이 없습니다.");
+      alert("No customers are included.");
       return;
     }
-    busyMsg = "저장 중입니다...";
+    busyMsg = "Saving...";
     drawReviewStep();
 
     let successCount = 0;
@@ -405,9 +405,9 @@ export async function renderCustomerUpload(container, ctx) {
 
     for (const b of toConfirm) {
       try {
-        if (!b.name) throw new Error("이름이 비어 있습니다.");
+        if (!b.name) throw new Error("Name is required.");
 
-        // 세일즈 담당자: 기존 이름과 대소문자 무관 일치 시 재사용, 없으면 새로 등록
+        // Salesperson: reuse an existing name (case-insensitive match), otherwise create a new one
         let salespersonId = null;
         if (b.salesperson) {
           const existing = salespeople.find(
@@ -427,7 +427,7 @@ export async function renderCustomerUpload(container, ctx) {
           }
         }
 
-        // 고객: 중복 의심 + "기존 고객과 동일" 체크 시 기존 고객 재사용, 아니면 신규 등록
+        // Customer: reuse the existing customer if flagged as a duplicate and confirmed by staff; otherwise create new
         let customerId = null;
         if (b.duplicate.suspect && b.linkToExisting && b.duplicate.matchedCustomerId) {
           customerId = b.duplicate.matchedCustomerId;
@@ -441,7 +441,7 @@ export async function renderCustomerUpload(container, ctx) {
           customerId = newCust.id;
         }
 
-        // 오더
+        // Order
         const { data: newOrder, error: orderErr } = await supabase
           .from("orders")
           .insert({
@@ -473,14 +473,14 @@ export async function renderCustomerUpload(container, ctx) {
         successCount++;
         b.savedOk = true;
       } catch (err) {
-        errors.push(`${b.name || "(이름없음)"}: ${err.message || err}`);
+        errors.push(`${b.name || "(no name)"}: ${err.message || err}`);
       }
     }
 
     blocks = blocks.filter((b) => !b.savedOk);
     busyMsg =
-      `${successCount}건 저장 완료.` +
-      (errors.length ? ` 실패 ${errors.length}건: ` + errors.join(" / ") : "");
+      `${successCount} saved.` +
+      (errors.length ? ` ${errors.length} failed: ` + errors.join(" / ") : "");
     drawReviewStep();
   }
 

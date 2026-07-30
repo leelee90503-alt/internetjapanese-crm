@@ -1,12 +1,13 @@
 import { supabase } from "./supabaseClient.js";
 import { normalizeAccountNumber, normalizePhone } from "./normalize.js";
 
-// 중복 의심 고객 판단: 이름 + 전화번호 + 계정번호 조합이 기존 데이터와 일치하면
-// "중복 의심"으로만 표시한다. 시스템이 자동으로 병합/제외하지 않으며,
-// 최종 판단은 항상 검토·확인 화면에서 직원이 내린다.
+// Duplicate-suspect check: if the name + phone + account number combination
+// matches existing data, the row is only flagged as a "possible duplicate."
+// The system never auto-merges or auto-excludes rows — the final call is
+// always made by staff on the review/confirm screen.
 //
-// - 이름+전화번호가 기존 고객(customers)과 일치 -> 이름·전화번호 일치
-// - 계정번호가 기존 오더 서비스 항목(order_service_lines)의 계정번호와 일치 -> 계정번호 일치
+// - Name+phone matches an existing customer (customers) -> name+phone match
+// - Account number matches an existing order service line (order_service_lines) -> account number match
 export async function checkDuplicateSuspect({ name, phone, accountNumber }) {
   const reasons = [];
   let matchedCustomerId = null;
@@ -24,7 +25,7 @@ export async function checkDuplicateSuspect({ name, phone, accountNumber }) {
     if (!error && data) {
       const hit = data.find((c) => normalizePhone(c.phone) === normPhone);
       if (hit) {
-        reasons.push("이름+전화번호 일치");
+        reasons.push("Name+phone match");
         matchedCustomerId = hit.id;
         matchedCustomerLabel = `${hit.name} (${hit.phone || "-"})`;
       }
@@ -38,7 +39,7 @@ export async function checkDuplicateSuspect({ name, phone, accountNumber }) {
       .eq("account_number", normAccount)
       .limit(5);
     if (!error && data && data.length > 0) {
-      reasons.push("계정번호 일치");
+      reasons.push("Account number match");
       if (!matchedCustomerId) {
         const line = data[0];
         const cust = line.orders?.customers;

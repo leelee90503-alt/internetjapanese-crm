@@ -1,8 +1,9 @@
 import { supabase } from "./supabaseClient.js";
 import { escapeHtml } from "./normalize.js";
 
-// 로그인/회원가입 화면을 그린다. 최초 1명은 가입 후 Supabase SQL Editor에서
-// profiles.role 을 'admin' 으로 직접 바꿔줘야 관리자가 된다. (README 참고)
+// Renders the login/signup screen. The very first person to sign up must have
+// their profiles.role switched to 'admin' directly in the Supabase SQL Editor
+// to become an admin (see README).
 export function renderAuthScreen(container, { onAuthed }) {
   let mode = "login"; // "login" | "signup"
   let errorMsg = "";
@@ -12,23 +13,23 @@ export function renderAuthScreen(container, { onAuthed }) {
     container.innerHTML = `
       <div class="auth-wrap">
         <div class="auth-card">
-          <h1>고객관리 시스템(CRM)</h1>
-          <p class="muted">직원 전용 내부 시스템입니다.</p>
+          <h1>Customer Management System (CRM)</h1>
+          <p class="muted">Internal system for employees only.</p>
           <div class="tabs">
-            <button data-mode="login" class="${mode === "login" ? "tab active" : "tab"}">로그인</button>
-            <button data-mode="signup" class="${mode === "signup" ? "tab active" : "tab"}">직원 가입</button>
+            <button data-mode="login" class="${mode === "login" ? "tab active" : "tab"}">Log In</button>
+            <button data-mode="signup" class="${mode === "signup" ? "tab active" : "tab"}">Sign Up</button>
           </div>
           ${errorMsg ? `<div class="alert error">${escapeHtml(errorMsg)}</div>` : ""}
           ${infoMsg ? `<div class="alert info">${escapeHtml(infoMsg)}</div>` : ""}
           <form id="auth-form">
             ${
               mode === "signup"
-                ? `<label>이름<input type="text" name="full_name" required /></label>`
+                ? `<label>Name<input type="text" name="full_name" required /></label>`
                 : ""
             }
-            <label>이메일<input type="email" name="email" required autocomplete="username" /></label>
-            <label>비밀번호<input type="password" name="password" required minlength="6" autocomplete="current-password" /></label>
-            <button type="submit" class="btn primary full">${mode === "login" ? "로그인" : "가입하기"}</button>
+            <label>Email<input type="email" name="email" required autocomplete="username" /></label>
+            <label>Password<input type="password" name="password" required minlength="6" autocomplete="current-password" /></label>
+            <button type="submit" class="btn primary full">${mode === "login" ? "Log In" : "Sign Up"}</button>
           </form>
         </div>
       </div>
@@ -54,7 +55,7 @@ export function renderAuthScreen(container, { onAuthed }) {
       if (mode === "login") {
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) {
-          errorMsg = "로그인 실패: " + error.message;
+          errorMsg = "Login failed: " + error.message;
           draw();
           return;
         }
@@ -67,12 +68,12 @@ export function renderAuthScreen(container, { onAuthed }) {
           options: { data: { full_name } },
         });
         if (error) {
-          errorMsg = "가입 실패: " + error.message;
+          errorMsg = "Sign up failed: " + error.message;
           draw();
           return;
         }
         infoMsg =
-          "가입 요청이 완료되었습니다. (이메일 확인이 켜져 있다면 메일함을 확인하세요) 최초 관리자 계정은 Supabase SQL Editor에서 role 을 admin 으로 바꿔야 합니다.";
+          "Sign-up request complete. (If email confirmation is enabled, check your inbox.) The first admin account must have its role switched to admin in the Supabase SQL Editor.";
         mode = "login";
         draw();
       }

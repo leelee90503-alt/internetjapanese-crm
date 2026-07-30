@@ -17,7 +17,7 @@ export async function renderOrders(container, ctx) {
       .order("order_date", { ascending: false });
     const { data, error } = await query;
     if (error) {
-      container.innerHTML = `<div class="alert error">불러오기 실패: ${escapeHtml(error.message)}</div>`;
+      container.innerHTML = `<div class="alert error">Failed to load: ${escapeHtml(error.message)}</div>`;
       return;
     }
     orders = data || [];
@@ -39,12 +39,12 @@ export async function renderOrders(container, ctx) {
     const rows = filtered();
     container.innerHTML = `
       <div class="screen">
-        <h2>고객 / 오더 관리</h2>
-        <p class="muted">전 직원이 전체 고객·오더 데이터를 조회할 수 있습니다. (커미션 관련 화면은 관리자 전용입니다)</p>
-        <input type="text" id="search" placeholder="이름/전화번호/세일즈담당자/계정번호 검색" value="${escapeHtml(search)}" />
+        <h2>Customers / Orders</h2>
+        <p class="muted">All staff can view all customer/order data. (Commission-related screens are admin-only)</p>
+        <input type="text" id="search" placeholder="Search by name/phone/salesperson/account number" value="${escapeHtml(search)}" />
         <table class="data-table">
           <thead>
-            <tr><th>오더날짜</th><th>고객명</th><th>전화번호</th><th>세일즈담당자</th><th>서비스 항목</th><th>상태</th></tr>
+            <tr><th>Order Date</th><th>Customer Name</th><th>Phone</th><th>Salesperson</th><th>Service Items</th><th>Status</th></tr>
           </thead>
           <tbody>
             ${
@@ -67,7 +67,7 @@ export async function renderOrders(container, ctx) {
                 <td>${escapeHtml(o.pipeline_stage)}</td>
               </tr>`
                 )
-                .join("") || `<tr><td colspan="6" class="muted">데이터가 없습니다.</td></tr>`
+                .join("") || `<tr><td colspan="6" class="muted">No data.</td></tr>`
             }
           </tbody>
         </table>

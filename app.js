@@ -8,11 +8,11 @@ import { renderStaff } from "./screen-staff.js";
 import { escapeHtml } from "./normalize.js";
 
 const ROUTES = [
-  { path: "#/dashboard", label: "대시보드", render: renderDashboard, adminOnly: false },
-  { path: "#/upload", label: "고객 엑셀 업로드", render: renderCustomerUpload, adminOnly: false },
-  { path: "#/orders", label: "고객/오더 관리", render: renderOrders, adminOnly: false },
-  { path: "#/master-data", label: "마스터 데이터", render: renderMasterData, adminOnly: false },
-  { path: "#/staff", label: "직원 관리", render: renderStaff, adminOnly: true },
+  { path: "#/dashboard", label: "Dashboard", render: renderDashboard, adminOnly: false },
+  { path: "#/upload", label: "Customer Excel Upload", render: renderCustomerUpload, adminOnly: false },
+  { path: "#/orders", label: "Customers / Orders", render: renderOrders, adminOnly: false },
+  { path: "#/master-data", label: "Master Data", render: renderMasterData, adminOnly: false },
+  { path: "#/staff", label: "Staff Management", render: renderStaff, adminOnly: true },
 ];
 
 const root = document.getElementById("app");
@@ -29,7 +29,7 @@ async function loadProfile() {
   }
   const { data, error } = await supabase.from("profiles").select("*").eq("id", user.id).single();
   if (error) {
-    console.error("프로필 조회 실패", error);
+    console.error("Failed to load profile", error);
     profile = null;
     return;
   }
@@ -56,7 +56,7 @@ async function renderApp() {
   }
 
   if (!profile) {
-    root.innerHTML = `<div class="auth-wrap"><div class="auth-card"><p>프로필을 불러오지 못했습니다. 잠시 후 새로고침 해주세요.</p></div></div>`;
+    root.innerHTML = `<div class="auth-wrap"><div class="auth-card"><p>Could not load your profile. Please refresh in a moment.</p></div></div>`;
     return;
   }
 
@@ -80,9 +80,9 @@ async function renderApp() {
         </nav>
         <div class="sidebar-footer">
           <div class="who">${escapeHtml(profile.full_name || profile.email)}<br/><span class="muted">${
-    profile.role === "admin" ? "관리자" : "일반 직원"
+    profile.role === "admin" ? "Admin" : "Staff"
   }</span></div>
-          <button class="btn small" id="logout-btn">로그아웃</button>
+          <button class="btn small" id="logout-btn">Log Out</button>
         </div>
       </aside>
       <main class="content" id="content"></main>

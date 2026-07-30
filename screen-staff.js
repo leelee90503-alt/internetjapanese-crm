@@ -8,15 +8,15 @@ export async function renderStaff(container, ctx) {
       .select("*")
       .order("created_at", { ascending: true });
     if (error) {
-      container.innerHTML = `<div class="alert error">불러오기 실패: ${escapeHtml(error.message)}</div>`;
+      container.innerHTML = `<div class="alert error">Failed to load: ${escapeHtml(error.message)}</div>`;
       return;
     }
     container.innerHTML = `
       <div class="screen">
-        <h2>직원 계정 관리 (관리자 전용)</h2>
-        <p class="muted">직원은 화면에서 직접 가입하며, 최초에는 모두 "일반" 권한으로 생성됩니다. 관리자가 여기서 권한을 바꿔줄 수 있습니다.</p>
+        <h2>Staff Account Management (Admin Only)</h2>
+        <p class="muted">Staff sign up directly from the screen and are all created with "Staff" permission initially. Admins can change permissions here.</p>
         <table class="data-table">
-          <thead><tr><th>이름</th><th>이메일</th><th>권한</th><th>사용여부</th><th>관리</th></tr></thead>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Active</th><th>Actions</th></tr></thead>
           <tbody>
             ${data
               .map(
@@ -26,12 +26,12 @@ export async function renderStaff(container, ctx) {
                 <td>${escapeHtml(p.email || "-")}</td>
                 <td>
                   <select class="p-role">
-                    <option value="staff" ${p.role === "staff" ? "selected" : ""}>일반</option>
-                    <option value="admin" ${p.role === "admin" ? "selected" : ""}>관리자</option>
+                    <option value="staff" ${p.role === "staff" ? "selected" : ""}>Staff</option>
+                    <option value="admin" ${p.role === "admin" ? "selected" : ""}>Admin</option>
                   </select>
                 </td>
                 <td><input type="checkbox" class="p-active" ${p.is_active ? "checked" : ""} /></td>
-                <td><button class="btn small save-row">저장</button></td>
+                <td><button class="btn small save-row">Save</button></td>
               </tr>`
               )
               .join("")}
@@ -47,7 +47,7 @@ export async function renderStaff(container, ctx) {
         const is_active = tr.querySelector(".p-active").checked;
         const { error: updErr } = await supabase.from("profiles").update({ role, is_active }).eq("id", id);
         if (updErr) {
-          alert("저장 실패: " + updErr.message);
+          alert("Failed to save: " + updErr.message);
           return;
         }
         await draw();
