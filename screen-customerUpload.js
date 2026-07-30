@@ -682,37 +682,67 @@ export async function renderCustomerUpload(container, ctx) {
     });
   }
 
+  // A merged row needs a human look if it came from only one of the two
+  // source files, or if a field the two files both reported disagrees.
+  function rowNeedsReview(r) {
+    const anyAccountMismatch = r.lines.some((l) => l.accountMismatch);
+    const anyUnitsMismatch = r.lines.some((l) => l.unitsMismatch);
+    const anyUnitsInstalledMismatch = r.lines.some((l) => l.unitsInstalledMismatch);
+    return !!(
+      r.onlyInA ||
+      r.onlyInB ||
+      r.nameMismatch ||
+      r.phoneMismatch ||
+      anyAccountMismatch ||
+      anyUnitsMismatch ||
+      anyUnitsInstalledMismatch
+    );
+  }
+
   function drawMergeReviewStep() {
     const includedCount = mergedRows.filter((r) => !r.excluded).length;
     const matchedBothCount = mergedRows.filter((r) => !r.onlyInA && !r.onlyInB).length;
     const onlyACount = mergedRows.filter((r) => r.onlyInA).length;
     const onlyBCount = mergedRows.filter((r) => r.onlyInB).length;
     const multiLineCount = mergedRows.filter((r) => r.lines.length > 1).length;
+    const reviewCount = mergedRows.filter((r) => rowNeedsReview(r)).length;
+
+    // Rows that need review (missing from one file, or a value mismatch
+    // between the two files) are listed first so they aren't missed among
+    // the already-clean rows.
+    const sortedRows = [...mergedRows].sort((a, b) => {
+      const aNeeds = rowNeedsReview(a) ? 1 : 0;
+      const bNeeds = rowNeedsReview(b) ? 1 : 0;
+      return bNeeds - aNeeds;
+    });
+
     container.innerHTML = `
       <div class="screen">
         <h2>Step 3: Merge Result Review</h2>
         <p class="muted">Matched ${mergedRows.length} order(s) by Order Id — ${matchedBothCount} found in both files, ${onlyACount} only in the Service Info file (missing Order Date), ${onlyBCount} only in the Order Info file (missing Product/Package)${
       multiLineCount ? `, ${multiLineCount} order(s) expanded into multiple service lines (e.g. mobile orders with several Order Number / Work Order values)` : ""
-    }. Units / Units Installed and Service/Provider selection per line can be fixed on the next screen.</p>
+    }. ${reviewCount} row(s) marked "Please review" below need a look and are listed first — you can fix values here, or on the next screen where Units / Units Installed and Service/Provider selection per line can also be edited.</p>
         <div class="btn-row">
           <button class="btn primary" id="merge-next-btn">Next: Review &amp; Confirm (${includedCount})</button>
           <button class="btn" id="merge-back-btn">Back (Column Mapping)</button>
         </div>
         <table class="data-table small">
           <thead>
-            <tr><th>Include</th><th>Order Id</th><th>Customer</th><th>Lines</th><th>Status</th><th>Flags</th></tr>
+            <tr><th>Review</th><th>Include</th><th>Order Id</th><th>Customer</th><th>Lines</th><th>Status</th><th>Flags</th></tr>
           </thead>
           <tbody>
             ${
-              mergedRows
+              sortedRows
                 .map((r) => {
                   const anyAccountMismatch = r.lines.some((l) => l.accountMismatch);
                   const anyUnitsMismatch = r.lines.some((l) => l.unitsMismatch);
                   const anyUnitsInstalledMismatch = r.lines.some((l) => l.unitsInstalledMismatch);
                   const noFlags =
                     !r.nameMismatch && !r.phoneMismatch && !anyAccountMismatch && !anyUnitsMismatch && !anyUnitsInstalledMismatch;
+                  const needsReview = rowNeedsReview(r);
                   return `
-              <tr data-mrow="${r.id}" class="${r.excluded ? "excluded" : ""}">
+              <tr data-mrow="${r.id}" class="${r.excluded ? "excluded" : ""} ${needsReview ? "needs-review-row" : ""}">
+                <td>${needsReview ? `<span class="badge error">Please review</span>` : `<span class="muted">-</span>`}</td>
                 <td><input type="checkbox" class="mr-include" ${r.excluded ? "" : "checked"} /></td>
                 <td>${escapeHtml(r.orderId)}</td>
                 <td>${escapeHtml(r.name || "-")}</td>
@@ -732,7 +762,7 @@ export async function renderCustomerUpload(container, ctx) {
                 </td>
               </tr>`;
                 })
-                .join("") || `<tr><td colspan="6" class="muted">No rows to merge.</td></tr>`
+                .join("") || `<tr><td colspan="7" class="muted">No rows to merge.</td></tr>`
             }
           </tbody>
         </table>

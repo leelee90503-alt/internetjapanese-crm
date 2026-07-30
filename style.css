@@ -88,6 +88,8 @@ input[type="number"], select {
 .block-card { border: 1px solid #e5e7eb; }
 .block-card.excluded { opacity: 0.5; }
 .block-card.needs-review { border: 2px solid #fca5a5; background: #fff7f7; }
+.data-table tr.needs-review-row { background: #fff7f7; }
+.data-table tr.needs-review-row:hover { background: #fdeaea; }
 .block-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .badge { padding: 3px 8px; border-radius: 999px; font-size: 0.8em; }
 .badge.warn { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
