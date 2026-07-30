@@ -51,8 +51,18 @@ input[type="number"], select {
 }
 .sidebar .brand { font-weight: 700; font-size: 1.2em; padding: 0 16px 16px; }
 .sidebar nav { display: flex; flex-direction: column; gap: 2px; flex: 1; }
-.nav-link { color: #cbd5e1; text-decoration: none; padding: 10px 16px; font-size: 0.92em; }
+.nav-link { color: #cbd5e1; text-decoration: none; padding: 10px 16px; font-size: 0.92em; display: block; }
 .nav-link.active, .nav-link:hover { background: #1f2937; color: white; }
+.nav-group { display: flex; flex-direction: column; }
+.nav-group-title {
+  display: flex; align-items: center; justify-content: space-between; width: 100%;
+  background: none; border: none; color: #cbd5e1; padding: 10px 16px; font-size: 0.92em;
+  cursor: pointer; font-family: inherit; text-align: left;
+}
+.nav-group-title:hover { background: #1f2937; color: white; }
+.nav-group-arrow { font-size: 0.75em; opacity: 0.7; }
+.nav-group-children { display: flex; flex-direction: column; }
+.nav-group-children .nav-link { padding-left: 32px; font-size: 0.88em; }
 .sidebar-footer { padding: 16px; border-top: 1px solid #1f2937; }
 .sidebar-footer .who { font-size: 0.85em; margin-bottom: 8px; }
 .sidebar-footer .btn { width: 100%; }
