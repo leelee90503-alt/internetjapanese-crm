@@ -40,6 +40,8 @@ const FIELD_DEFS = [
 const FILE_A_FIELDS = [
   { key: "order_id", label: "Order Id", guesses: ["order id", "orderid"], required: true },
   { key: "name", label: "Customer Full Name", guesses: ["customer full name", "full name", "customer name"] },
+  { key: "first_name", label: "First Name", guesses: ["first name", "firstname"] },
+  { key: "last_name", label: "Last Name", guesses: ["last name", "lastname"] },
   { key: "address", label: "Address", guesses: ["address"] },
   { key: "city", label: "City", guesses: ["city"] },
   { key: "state", label: "State", guesses: ["state"] },
@@ -59,6 +61,8 @@ const FILE_B_FIELDS = [
   { key: "order_id", label: "Order Id", guesses: ["order id", "orderid"], required: true },
   { key: "order_date", label: "Order Date", guesses: ["order date"] },
   { key: "name", label: "Customer Full Name", guesses: ["customer full name", "full name", "customer name"] },
+  { key: "first_name", label: "First Name", guesses: ["first name", "firstname"] },
+  { key: "last_name", label: "Last Name", guesses: ["last name", "lastname"] },
   { key: "address", label: "Address", guesses: ["address"] },
   { key: "city", label: "City", guesses: ["city"] },
   { key: "state", label: "State", guesses: ["state"] },
@@ -531,90 +535,134 @@ export async function renderCustomerUpload(container, ctx) {
   }
 
   // ---- two-file merge ----
+  // A single Order Id can appear more than once in either file — most commonly
+  // in mobile orders with 2-5 lines, where the Order Info file has one row per
+  // line with its own Order Number / Work Order (e.g. 1-5) but the Service Info
+  // file may still have just one (aggregate) row for that Order Id. pairRows()
+  // pairs up same-Order-Id rows across both files: if one side has exactly one
+  // row and the other has several, the single row is paired with every row on
+  // the other side (broadcast); otherwise rows are paired by position.
+  function pairRows(aRows, bRows) {
+    if (aRows.length <= 1 && bRows.length > 1) {
+      const aRow = aRows[0] || null;
+      return bRows.map((bRow) => [aRow, bRow]);
+    }
+    if (bRows.length <= 1 && aRows.length > 1) {
+      const bRow = bRows[0] || null;
+      return aRows.map((aRow) => [aRow, bRow]);
+    }
+    const maxLen = Math.max(aRows.length, bRows.length, 1);
+    const pairs = [];
+    for (let i = 0; i < maxLen; i++) pairs.push([aRows[i] || null, bRows[i] || null]);
+    return pairs;
+  }
+
   function buildMergedRows() {
-    const aIndex = new Map();
+    const aGroups = new Map();
     fileADataRows.forEach((row) => {
       const oid = normText(cellByMapping(row, fileAMapping, "order_id"));
       if (!oid) return;
-      aIndex.set(oid, row);
+      if (!aGroups.has(oid)) aGroups.set(oid, []);
+      aGroups.get(oid).push(row);
     });
-    const bIndex = new Map();
+    const bGroups = new Map();
     fileBDataRows.forEach((row) => {
       const oid = normText(cellByMapping(row, fileBMapping, "order_id"));
       if (!oid) return;
-      bIndex.set(oid, row);
+      if (!bGroups.has(oid)) bGroups.set(oid, []);
+      bGroups.get(oid).push(row);
     });
 
-    const allIds = Array.from(new Set([...aIndex.keys(), ...bIndex.keys()])).sort();
+    const getA = (row, key) => (row ? cellByMapping(row, fileAMapping, key) : "");
+    const getB = (row, key) => (row ? cellByMapping(row, fileBMapping, key) : "");
+    const resolveName = (aRow, bRow) => {
+      const full = getA(aRow, "name") || getB(bRow, "name");
+      if (full) return full;
+      const first = getA(aRow, "first_name") || getB(bRow, "first_name");
+      const last = getA(aRow, "last_name") || getB(bRow, "last_name");
+      return [first, last].filter((v) => v && String(v).trim() !== "").join(" ");
+    };
+
+    const allIds = Array.from(new Set([...aGroups.keys(), ...bGroups.keys()])).sort();
     mergedRows = allIds.map((oid) => {
-      const aRow = aIndex.get(oid) || null;
-      const bRow = bIndex.get(oid) || null;
-      const getA = (key) => (aRow ? cellByMapping(aRow, fileAMapping, key) : "");
-      const getB = (key) => (bRow ? cellByMapping(bRow, fileBMapping, key) : "");
+      const aRows = aGroups.get(oid) || [];
+      const bRows = bGroups.get(oid) || [];
+      const pairs = pairRows(aRows, bRows);
+      const [firstA, firstB] = pairs[0] || [null, null];
 
-      const aName = getA("name");
-      const bName = getB("name");
-      const aPhone = getA("phone");
-      const bPhone = getB("phone");
-      const aAccount = getA("account_number");
-      const bAccount = getB("account_number");
-      const aUnits = getA("units");
-      const bUnits = getB("units");
-      const aUnitsInstalled = getA("units_installed");
-      const bUnitsInstalled = getB("units_installed");
+      // order-level info (name/phone/address/date/salesperson) taken from the
+      // first pair — every line of the same order is assumed to share it.
+      const name = resolveName(firstA, firstB);
+      const aPhone = getA(firstA, "phone");
+      const bPhone = getB(firstB, "phone");
+      const address = joinAddress(
+        getA(firstA, "address") || getB(firstB, "address"),
+        getA(firstA, "city") || getB(firstB, "city"),
+        getA(firstA, "state") || getB(firstB, "state"),
+        getA(firstA, "zip") || getB(firstB, "zip")
+      );
 
-      const mismatches = {};
-      if (normText(aName) && normText(bName) && normText(aName) !== normText(bName)) {
-        mismatches.name = { a: aName, b: bName };
-      }
-      if (normalizePhone(aPhone) && normalizePhone(bPhone) && normalizePhone(aPhone) !== normalizePhone(bPhone)) {
-        mismatches.phone = { a: aPhone, b: bPhone };
-      }
-      if (
-        normalizeAccountNumber(aAccount) &&
-        normalizeAccountNumber(bAccount) &&
-        normalizeAccountNumber(aAccount) !== normalizeAccountNumber(bAccount)
-      ) {
-        mismatches.accountNumber = { a: aAccount, b: bAccount };
-      }
-      if (normNum(aUnits) !== null && normNum(bUnits) !== null && normNum(aUnits) !== normNum(bUnits)) {
-        mismatches.units = { a: aUnits, b: bUnits };
-      }
-      if (
-        normNum(aUnitsInstalled) !== null &&
-        normNum(bUnitsInstalled) !== null &&
-        normNum(aUnitsInstalled) !== normNum(bUnitsInstalled)
-      ) {
-        mismatches.unitsInstalled = { a: aUnitsInstalled, b: bUnitsInstalled };
-      }
+      const aNameOnly = resolveName(firstA, null);
+      const bNameOnly = resolveName(null, firstB);
+      const nameMismatch = !!(
+        normText(aNameOnly) && normText(bNameOnly) && normText(aNameOnly) !== normText(bNameOnly)
+      );
+      const phoneMismatch = !!(
+        normalizePhone(aPhone) && normalizePhone(bPhone) && normalizePhone(aPhone) !== normalizePhone(bPhone)
+      );
+
+      // per-line info (one entry per paired row — e.g. one per mobile work order)
+      const lines = pairs.map(([aRow, bRow]) => {
+        const aAccount = getA(aRow, "account_number");
+        const bAccount = getB(bRow, "account_number");
+        const aUnits = getA(aRow, "units");
+        const bUnits = getB(bRow, "units");
+        const aUnitsInstalled = getA(aRow, "units_installed");
+        const bUnitsInstalled = getB(bRow, "units_installed");
+        const planName =
+          [getA(aRow, "product"), getA(aRow, "package"), getA(aRow, "package_group")]
+            .filter((v) => v && String(v).trim() !== "")
+            .join(" / ") || null;
+        return {
+          accountNumber: normalizeAccountNumber(aAccount || bAccount),
+          accountMismatch: !!(
+            normalizeAccountNumber(aAccount) &&
+            normalizeAccountNumber(bAccount) &&
+            normalizeAccountNumber(aAccount) !== normalizeAccountNumber(bAccount)
+          ),
+          units: normNum(aUnits) !== null ? normNum(aUnits) : normNum(bUnits),
+          unitsMismatch: !!(normNum(aUnits) !== null && normNum(bUnits) !== null && normNum(aUnits) !== normNum(bUnits)),
+          unitsInstalled: normNum(aUnitsInstalled) !== null ? normNum(aUnitsInstalled) : normNum(bUnitsInstalled),
+          unitsInstalledMismatch: !!(
+            normNum(aUnitsInstalled) !== null &&
+            normNum(bUnitsInstalled) !== null &&
+            normNum(aUnitsInstalled) !== normNum(bUnitsInstalled)
+          ),
+          mobileLinesOrdered: normNum(getA(aRow, "mobile_lines_ordered")),
+          mobileLinesInstalled: normNum(getA(aRow, "mobile_lines_installed")),
+          packageGroup: getA(aRow, "package_group"),
+          package: getA(aRow, "package"),
+          product: getA(aRow, "product"),
+          planName,
+          orderNumber: getB(bRow, "order_number"),
+        };
+      });
 
       return {
         id: crypto.randomUUID(),
         orderId: oid,
-        onlyInA: !bRow,
-        onlyInB: !aRow,
+        onlyInA: bRows.length === 0,
+        onlyInB: aRows.length === 0,
         excluded: false,
-        mismatches,
-        name: aName || bName,
+        name,
         phone: aPhone || bPhone,
-        address: joinAddress(
-          getA("address") || getB("address"),
-          getA("city") || getB("city"),
-          getA("state") || getB("state"),
-          getA("zip") || getB("zip")
-        ),
-        orderDate: normalizeDate(getB("order_date")),
-        accountNumber: normalizeAccountNumber(aAccount || bAccount),
-        units: normNum(aUnits) !== null ? normNum(aUnits) : normNum(bUnits),
-        unitsInstalled: normNum(aUnitsInstalled) !== null ? normNum(aUnitsInstalled) : normNum(bUnitsInstalled),
-        product: getA("product"),
-        package: getA("package"),
-        packageGroup: getA("package_group"),
-        mobileLinesOrdered: normNum(getA("mobile_lines_ordered")),
-        mobileLinesInstalled: normNum(getA("mobile_lines_installed")),
-        orderNumber: getB("order_number"),
-        category: getB("category"),
-        salesperson: getB("salesperson"),
+        address,
+        orderDate: normalizeDate(getB(firstB, "order_date")),
+        salesperson: getB(firstB, "salesperson"),
+        category: getB(firstB, "category"),
+        nameMismatch,
+        phoneMismatch,
+        lines,
       };
     });
   }
@@ -624,45 +672,52 @@ export async function renderCustomerUpload(container, ctx) {
     const matchedBothCount = mergedRows.filter((r) => !r.onlyInA && !r.onlyInB).length;
     const onlyACount = mergedRows.filter((r) => r.onlyInA).length;
     const onlyBCount = mergedRows.filter((r) => r.onlyInB).length;
+    const multiLineCount = mergedRows.filter((r) => r.lines.length > 1).length;
     container.innerHTML = `
       <div class="screen">
         <h2>Step 3: Merge Result Review</h2>
-        <p class="muted">Matched ${mergedRows.length} order(s) by Order Id — ${matchedBothCount} found in both files, ${onlyACount} only in the Service Info file (missing Order Date), ${onlyBCount} only in the Order Info file (missing Product/Package). Fix Units / Units Installed here if they differ between the two files; missing Order Date and Service/Provider selections can still be filled in on the next screen.</p>
+        <p class="muted">Matched ${mergedRows.length} order(s) by Order Id — ${matchedBothCount} found in both files, ${onlyACount} only in the Service Info file (missing Order Date), ${onlyBCount} only in the Order Info file (missing Product/Package)${
+      multiLineCount ? `, ${multiLineCount} order(s) expanded into multiple service lines (e.g. mobile orders with several Order Number / Work Order values)` : ""
+    }. Units / Units Installed and Service/Provider selection per line can be fixed on the next screen.</p>
         <div class="btn-row">
           <button class="btn primary" id="merge-next-btn">Next: Review &amp; Confirm (${includedCount})</button>
           <button class="btn" id="merge-back-btn">Back (Column Mapping)</button>
         </div>
         <table class="data-table small">
           <thead>
-            <tr><th>Include</th><th>Order Id</th><th>Customer</th><th>Status</th><th>Flags</th><th>Units</th><th>Units Installed</th></tr>
+            <tr><th>Include</th><th>Order Id</th><th>Customer</th><th>Lines</th><th>Status</th><th>Flags</th></tr>
           </thead>
           <tbody>
             ${
               mergedRows
-                .map(
-                  (r) => `
+                .map((r) => {
+                  const anyAccountMismatch = r.lines.some((l) => l.accountMismatch);
+                  const anyUnitsMismatch = r.lines.some((l) => l.unitsMismatch);
+                  const anyUnitsInstalledMismatch = r.lines.some((l) => l.unitsInstalledMismatch);
+                  const noFlags =
+                    !r.nameMismatch && !r.phoneMismatch && !anyAccountMismatch && !anyUnitsMismatch && !anyUnitsInstalledMismatch;
+                  return `
               <tr data-mrow="${r.id}" class="${r.excluded ? "excluded" : ""}">
                 <td><input type="checkbox" class="mr-include" ${r.excluded ? "" : "checked"} /></td>
                 <td>${escapeHtml(r.orderId)}</td>
                 <td>${escapeHtml(r.name || "-")}</td>
+                <td>${r.lines.length}${r.lines.length > 1 ? ` <span class="badge neutral">multi-line</span>` : ""}</td>
                 <td>
                   ${r.onlyInA ? `<span class="badge warn">Only in Service Info file</span>` : ""}
                   ${r.onlyInB ? `<span class="badge warn">Only in Order Info file</span>` : ""}
                   ${!r.onlyInA && !r.onlyInB ? `<span class="badge ok">Matched</span>` : ""}
                 </td>
                 <td>
-                  ${r.mismatches.name ? `<span class="badge error">Name differs</span>` : ""}
-                  ${r.mismatches.phone ? `<span class="badge error">Phone differs</span>` : ""}
-                  ${r.mismatches.accountNumber ? `<span class="badge error">Account # differs</span>` : ""}
-                  ${r.mismatches.units ? `<span class="badge error">Units: ${escapeHtml(String(r.mismatches.units.a))} / ${escapeHtml(String(r.mismatches.units.b))}</span>` : ""}
-                  ${r.mismatches.unitsInstalled ? `<span class="badge error">Units Installed: ${escapeHtml(String(r.mismatches.unitsInstalled.a))} / ${escapeHtml(String(r.mismatches.unitsInstalled.b))}</span>` : ""}
-                  ${Object.keys(r.mismatches).length === 0 && !r.onlyInA && !r.onlyInB ? `<span class="muted">-</span>` : ""}
+                  ${r.nameMismatch ? `<span class="badge error">Name differs</span>` : ""}
+                  ${r.phoneMismatch ? `<span class="badge error">Phone differs</span>` : ""}
+                  ${anyAccountMismatch ? `<span class="badge error">Account # differs</span>` : ""}
+                  ${anyUnitsMismatch ? `<span class="badge error">Units differ</span>` : ""}
+                  ${anyUnitsInstalledMismatch ? `<span class="badge error">Units Installed differ</span>` : ""}
+                  ${noFlags ? `<span class="muted">-</span>` : ""}
                 </td>
-                <td><input type="number" class="mr-units" value="${r.units ?? ""}" style="width:70px" /></td>
-                <td><input type="number" class="mr-units-installed" value="${r.unitsInstalled ?? ""}" style="width:70px" /></td>
-              </tr>`
-                )
-                .join("") || `<tr><td colspan="7" class="muted">No rows to merge.</td></tr>`
+              </tr>`;
+                })
+                .join("") || `<tr><td colspan="6" class="muted">No rows to merge.</td></tr>`
             }
           </tbody>
         </table>
@@ -681,12 +736,6 @@ export async function renderCustomerUpload(container, ctx) {
       tr.querySelector(".mr-include").addEventListener("change", (e) => {
         r.excluded = !e.target.checked;
       });
-      tr.querySelector(".mr-units").addEventListener("change", (e) => {
-        r.units = e.target.value === "" ? null : Number(e.target.value);
-      });
-      tr.querySelector(".mr-units-installed").addEventListener("change", (e) => {
-        r.unitsInstalled = e.target.value === "" ? null : Number(e.target.value);
-      });
     });
     container.querySelector("#merge-next-btn").addEventListener("click", async () => {
       await buildBlocksFromMerge();
@@ -698,11 +747,6 @@ export async function renderCustomerUpload(container, ctx) {
   async function buildBlocksFromMerge() {
     blocks = [];
     for (const r of mergedRows.filter((x) => !x.excluded)) {
-      const planName =
-        [r.product, r.package, r.packageGroup].filter((v) => v && String(v).trim() !== "").join(" / ") || null;
-      const serviceId =
-        matchMaster(services, r.packageGroup) || matchMaster(services, r.package) || matchMaster(services, r.product);
-
       blocks.push({
         id: crypto.randomUUID(),
         name: r.name || "",
@@ -713,24 +757,23 @@ export async function renderCustomerUpload(container, ctx) {
         duplicate: { suspect: false, reason: "", matchedCustomerId: null, matchedCustomerLabel: null },
         linkToExisting: false,
         sourceOrderId: r.orderId,
-        orderNumber: r.orderNumber || null,
+        orderNumber: r.lines.map((l) => l.orderNumber).filter(Boolean).join(", ") || null,
         category: r.category || null,
-        lines: [
-          {
-            id: crypto.randomUUID(),
-            excluded: false,
-            serviceId,
-            providerId: defaultProviderId || null,
-            accountNumberRaw: r.accountNumber || "",
-            accountNumber: r.accountNumber || "",
-            expectedCommission: null,
-            units: r.units,
-            unitsInstalled: r.unitsInstalled,
-            mobileLinesOrdered: r.mobileLinesOrdered,
-            mobileLinesInstalled: r.mobileLinesInstalled,
-            planName,
-          },
-        ],
+        lines: r.lines.map((l) => ({
+          id: crypto.randomUUID(),
+          excluded: false,
+          serviceId:
+            matchMaster(services, l.packageGroup) || matchMaster(services, l.package) || matchMaster(services, l.product),
+          providerId: defaultProviderId || null,
+          accountNumberRaw: l.accountNumber || "",
+          accountNumber: l.accountNumber || "",
+          expectedCommission: null,
+          units: l.units,
+          unitsInstalled: l.unitsInstalled,
+          mobileLinesOrdered: l.mobileLinesOrdered,
+          mobileLinesInstalled: l.mobileLinesInstalled,
+          planName: l.planName,
+        })),
       });
     }
 
