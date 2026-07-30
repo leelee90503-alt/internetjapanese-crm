@@ -1,6 +1,18 @@
 import { supabase } from "./supabaseClient.js";
 import { escapeHtml, fmtMoney } from "./normalize.js";
 
+function todayStr() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString().slice(0, 10);
+}
+
+function addDays(dateStr, days) {
+  const d = new Date((dateStr || todayStr()) + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 function commissionBadge(status) {
   if (status === "received") return `<span class="badge ok">Received</span>`;
   if (status === "mismatch") return `<span class="badge error">Mismatch</span>`;
@@ -15,8 +27,12 @@ export async function renderOrders(container, ctx) {
   let selected = new Set();
   let detailKey = null;
   let detailNotes = [];
+  let detailFollowUps = [];
   let detailBusy = false;
   let noteBusy = false;
+  let followUpBusy = false;
+  let newFollowUpDate = "";
+  let newFollowUpReason = "";
 
   // The list is built from `customers` (not `orders`) so that a customer
   // saved without a successful order/line save (e.g. a dropped connection
@@ -83,6 +99,19 @@ export async function renderOrders(container, ctx) {
       .eq("customer_id", customerId)
       .order("created_at", { ascending: true });
     detailNotes = error ? [] : data || [];
+  }
+
+  async function loadFollowUpsFor(customerId) {
+    if (!customerId) {
+      detailFollowUps = [];
+      return;
+    }
+    const { data, error } = await supabase
+      .from("follow_ups")
+      .select("id, due_date, reason, status, completed_at")
+      .eq("customer_id", customerId)
+      .order("due_date", { ascending: true });
+    detailFollowUps = error ? [] : data || [];
   }
 
   function detailModalHtml(rows) {
@@ -164,6 +193,36 @@ export async function renderOrders(container, ctx) {
           <div class="inline-form">
             <textarea id="note-input" placeholder="Add a note about this customer..." rows="2" style="flex:1"></textarea>
             <button class="btn primary" id="note-add-btn" ${noteBusy ? "disabled" : ""}>${noteBusy ? "Saving..." : "Add Note"}</button>
+          </div>
+
+          <h4>Follow-ups</h4>
+          <div id="followups-list">
+            ${
+              detailFollowUps
+                .map(
+                  (f) => `
+              <div class="note-item">
+                <div class="note-meta">
+                  ${
+                    f.status === "done"
+                      ? `<span class="badge ok">Done</span>`
+                      : `<span class="badge warn">Due ${escapeHtml(f.due_date)}</span>`
+                  }
+                </div>
+                <div class="note-text">${escapeHtml(f.reason || "-")}</div>
+              </div>`
+                )
+                .join("") || `<p class="muted">No follow-ups yet.</p>`
+            }
+          </div>
+          <div class="inline-form">
+            <label>Due Date<input type="date" id="followup-date-input" value="${escapeHtml(newFollowUpDate || "")}" /></label>
+            <button type="button" class="btn small" id="followup-quick-1w">+1 Week</button>
+            <button type="button" class="btn small" id="followup-quick-2w">+2 Weeks</button>
+          </div>
+          <div class="inline-form">
+            <textarea id="followup-reason-input" placeholder="Why is a follow-up needed? (e.g. confirm credit was applied, call back about...)" rows="2" style="flex:1">${escapeHtml(newFollowUpReason || "")}</textarea>
+            <button class="btn primary" id="followup-add-btn" ${followUpBusy ? "disabled" : ""}>${followUpBusy ? "Saving..." : "Add Follow-up"}</button>
           </div>
         </div>
       </div>
@@ -282,9 +341,11 @@ export async function renderOrders(container, ctx) {
       tr.addEventListener("click", async () => {
         detailKey = tr.dataset.rowKey;
         detailBusy = true;
+        newFollowUpDate = "";
+        newFollowUpReason = "";
         draw();
         const row = rows.find((r) => r.rowKey === detailKey);
-        await loadNotesFor(row?.customer?.id);
+        await Promise.all([loadNotesFor(row?.customer?.id), loadFollowUpsFor(row?.customer?.id)]);
         detailBusy = false;
         draw();
       });
@@ -328,6 +389,54 @@ export async function renderOrders(container, ctx) {
       }
       await loadNotesFor(customerId);
       noteBusy = false;
+      draw();
+    });
+
+    container.querySelector("#followup-quick-1w")?.addEventListener("click", () => {
+      const input = container.querySelector("#followup-date-input");
+      newFollowUpDate = addDays(input.value || todayStr(), 7);
+      draw();
+    });
+    container.querySelector("#followup-quick-2w")?.addEventListener("click", () => {
+      const input = container.querySelector("#followup-date-input");
+      newFollowUpDate = addDays(input.value || todayStr(), 14);
+      draw();
+    });
+    container.querySelector("#followup-date-input")?.addEventListener("change", (e) => {
+      newFollowUpDate = e.target.value;
+    });
+    container.querySelector("#followup-reason-input")?.addEventListener("input", (e) => {
+      newFollowUpReason = e.target.value;
+    });
+    container.querySelector("#followup-add-btn")?.addEventListener("click", async () => {
+      const dateInput = container.querySelector("#followup-date-input");
+      const reasonInput = container.querySelector("#followup-reason-input");
+      const dueDate = dateInput.value;
+      const reason = reasonInput.value.trim();
+      if (!dueDate) {
+        alert("Pick a due date first.");
+        return;
+      }
+      const row = rows.find((r) => r.rowKey === detailKey);
+      const customerId = row?.customer?.id;
+      if (!customerId) return;
+      followUpBusy = true;
+      draw();
+      const { error } = await supabase.from("follow_ups").insert({
+        customer_id: customerId,
+        order_id: row?.order?.id || null,
+        due_date: dueDate,
+        reason: reason || null,
+        created_by: ctx.profile?.id || null,
+      });
+      if (error) {
+        alert("Failed to save follow-up: " + error.message);
+      } else {
+        newFollowUpDate = "";
+        newFollowUpReason = "";
+      }
+      await loadFollowUpsFor(customerId);
+      followUpBusy = false;
       draw();
     });
   }

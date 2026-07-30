@@ -4,6 +4,7 @@ import { renderDashboard } from "./screen-dashboard.js";
 import { renderMasterData } from "./screen-masterData.js";
 import { renderCustomerUpload } from "./screen-customerUpload.js";
 import { renderOrders } from "./screen-orders.js";
+import { renderFollowups } from "./screen-followups.js";
 import { renderStaff } from "./screen-staff.js";
 import { renderCommissionReports } from "./screen-commissionReports.js";
 import { escapeHtml } from "./normalize.js";
@@ -14,6 +15,7 @@ import { escapeHtml } from "./normalize.js";
 const NAV = [
   { type: "link", path: "#/dashboard", label: "Dashboard", render: renderDashboard, adminOnly: false },
   { type: "link", path: "#/orders", label: "Customer / Order", render: renderOrders, adminOnly: false },
+  { type: "link", path: "#/followups", label: "Follow-ups", render: renderFollowups, adminOnly: false },
   {
     type: "group",
     key: "commission",

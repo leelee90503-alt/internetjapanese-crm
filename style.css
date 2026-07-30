@@ -94,6 +94,9 @@ input[type="number"], select {
 .data-table tr.needs-review-row:hover { background: #fdeaea; }
 .hint-error { color: #b91c1c; font-size: 0.78em; margin-top: 3px; max-width: 180px; }
 
+/* Follow-ups */
+.data-table tr.postpone-row td { background: #f9fafb; padding-top: 10px; padding-bottom: 10px; }
+
 /* Customers/Orders detail modal */
 .clickable-row { cursor: pointer; }
 .clickable-row:hover { background: #f3f4f6; }

@@ -77,6 +77,18 @@ const FILE_B_FIELDS = [
   { key: "salesperson", label: "SalesIdName", guesses: ["salesidname", "sales id name", "sales id", "salesperson"] },
 ];
 
+function todayStr() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString().slice(0, 10);
+}
+
+function addDays(dateStr, days) {
+  const d = new Date((dateStr || todayStr()) + "T00:00:00");
+  d.setDate(d.getDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
 // Two-pass auto-detect: exact header match first, then substring match, each
 // pass respecting field order and never reusing an already-claimed column.
 function autoDetectMapping(headers, fieldDefs) {
@@ -598,6 +610,9 @@ export async function renderCustomerUpload(container, ctx) {
           category: null,
           needsReview: false,
           reviewReasons: [],
+          followUpNeeded: false,
+          followUpDate: null,
+          followUpReason: "",
           lines: [],
         };
         blocks.push(current);
@@ -955,6 +970,9 @@ export async function renderCustomerUpload(container, ctx) {
         category: r.category || null,
         needsReview: reviewReasons.length > 0,
         reviewReasons,
+        followUpNeeded: false,
+        followUpDate: null,
+        followUpReason: "",
         lines: r.lines.map((l) => ({
           id: crypto.randomUUID(),
           excluded: false,
@@ -1055,6 +1073,19 @@ export async function renderCustomerUpload(container, ctx) {
         <label>Salesperson<input type="text" class="b-sales" list="sp-list" value="${escapeHtml(b.salesperson)}" /></label>
         <label>Address<input type="text" class="b-address" value="${escapeHtml(b.address || "")}" /></label>
       </div>
+      <label class="checkbox-inline"><input type="checkbox" class="b-followup-needed" ${b.followUpNeeded ? "checked" : ""} /> Follow-up needed</label>
+      ${
+        b.followUpNeeded
+          ? `<div class="inline-form">
+              <label>Follow-up Date<input type="date" class="b-followup-date" value="${b.followUpDate || ""}" /></label>
+              <button type="button" class="btn small b-followup-1w">+1 Week</button>
+              <button type="button" class="btn small b-followup-2w">+2 Weeks</button>
+            </div>
+            <div class="inline-form">
+              <textarea class="b-followup-reason" placeholder="Why is a follow-up needed? (e.g. confirm credit was applied, call back about...)" rows="2" style="flex:1">${escapeHtml(b.followUpReason || "")}</textarea>
+            </div>`
+          : ""
+      }
       <table class="data-table small">
         <thead><tr><th>Include</th><th>Service</th><th>Provider</th><th>Account #</th><th>Units</th><th>Units Installed</th><th>Expected Commission</th><th></th></tr></thead>
         <tbody>
@@ -1104,6 +1135,11 @@ export async function renderCustomerUpload(container, ctx) {
     if (addressEl) b.address = addressEl.value.trim();
     const linkEl = card.querySelector(".b-link-existing");
     if (linkEl) b.linkToExisting = linkEl.checked;
+    b.followUpNeeded = card.querySelector(".b-followup-needed").checked;
+    const followUpDateEl = card.querySelector(".b-followup-date");
+    if (followUpDateEl) b.followUpDate = followUpDateEl.value || null;
+    const followUpReasonEl = card.querySelector(".b-followup-reason");
+    if (followUpReasonEl) b.followUpReason = followUpReasonEl.value.trim();
     card.querySelectorAll("tr[data-line]").forEach((tr) => {
       const line = b.lines.find((l) => l.id === tr.dataset.line);
       if (!line) return;
@@ -1137,6 +1173,9 @@ export async function renderCustomerUpload(container, ctx) {
         category: null,
         needsReview: false,
         reviewReasons: [],
+        followUpNeeded: false,
+        followUpDate: null,
+        followUpReason: "",
         lines: [
           {
             id: crypto.randomUUID(),
@@ -1199,6 +1238,22 @@ export async function renderCustomerUpload(container, ctx) {
           drawReviewStep();
         });
       });
+      card.querySelector(".b-followup-needed").addEventListener("change", (e) => {
+        readBlockFromCard(card, b);
+        b.followUpNeeded = e.target.checked;
+        if (b.followUpNeeded && !b.followUpDate) {
+          b.followUpDate = addDays(b.orderDate || todayStr(), 7);
+        }
+        drawReviewStep();
+      });
+      card.querySelector(".b-followup-1w")?.addEventListener("click", () => {
+        const dateInput = card.querySelector(".b-followup-date");
+        dateInput.value = addDays(dateInput.value || b.orderDate || todayStr(), 7);
+      });
+      card.querySelector(".b-followup-2w")?.addEventListener("click", () => {
+        const dateInput = card.querySelector(".b-followup-date");
+        dateInput.value = addDays(dateInput.value || b.orderDate || todayStr(), 14);
+      });
     });
 
     container.querySelector("#confirm-btn").addEventListener("click", async () => {
@@ -1247,6 +1302,7 @@ export async function renderCustomerUpload(container, ctx) {
     let skippedBlockCount = 0;
     let skippedLineCount = 0;
     const errors = [];
+    const followUpErrors = [];
 
     for (const b of toConfirm) {
       try {
@@ -1317,9 +1373,10 @@ export async function renderCustomerUpload(container, ctx) {
           customerWasNewlyCreated = true;
         }
 
+        let newOrder = null;
         try {
           // Order
-          const { data: newOrder, error: orderErr } = await supabase
+          const { data: orderData, error: orderErr } = await supabase
             .from("orders")
             .insert({
               customer_id: customerId,
@@ -1334,6 +1391,7 @@ export async function renderCustomerUpload(container, ctx) {
             .select()
             .single();
           if (orderErr) throw orderErr;
+          newOrder = orderData;
 
           const lineRows = [];
           for (const l of nonDupLines) {
@@ -1368,6 +1426,22 @@ export async function renderCustomerUpload(container, ctx) {
           throw innerErr;
         }
 
+        // Follow-up (optional): the order/lines above are already saved at
+        // this point, so a follow-up save failure is reported alongside the
+        // summary instead of rolling back the whole customer/order.
+        if (b.followUpNeeded && b.followUpDate) {
+          const { error: followUpErr } = await supabase.from("follow_ups").insert({
+            customer_id: customerId,
+            order_id: newOrder?.id || null,
+            due_date: b.followUpDate,
+            reason: b.followUpReason || null,
+            created_by: ctx.profile?.id || null,
+          });
+          if (followUpErr) {
+            followUpErrors.push(`${b.name || "(no name)"}: ${followUpErr.message}`);
+          }
+        }
+
         successCount++;
         b.savedOk = true;
       } catch (err) {
@@ -1380,7 +1454,10 @@ export async function renderCustomerUpload(container, ctx) {
       `${successCount} saved.` +
       (skippedBlockCount ? ` ${skippedBlockCount} customer(s) skipped (already saved — same Account Number + Name + Service).` : "") +
       (skippedLineCount ? ` ${skippedLineCount} line(s) skipped as duplicates.` : "") +
-      (errors.length ? ` ${errors.length} failed: ` + errors.join(" / ") : "");
+      (errors.length ? ` ${errors.length} failed: ` + errors.join(" / ") : "") +
+      (followUpErrors.length
+        ? ` ${followUpErrors.length} follow-up(s) failed to save (customer/order were saved fine): ` + followUpErrors.join(" / ")
+        : "");
     drawReviewStep();
   }
 
