@@ -69,6 +69,8 @@ input[type="number"], select {
 
 .content { flex: 1; padding: 24px 32px; overflow-x: auto; }
 .screen h2 { margin-top: 0; }
+.screen-header-row { display: flex; align-items: center; justify-content: space-between; }
+.screen-header-row h2 { margin: 0; }
 
 .card { background: white; border-radius: 8px; padding: 16px; margin: 12px 0; box-shadow: 0 1px 4px rgba(0,0,0,0.06); }
 

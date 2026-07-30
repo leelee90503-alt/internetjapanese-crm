@@ -201,11 +201,68 @@ export async function renderCustomerUpload(container, ctx) {
     salespeople = sp.data || [];
   }
 
+  // Shared header (title + Reset) rendered at the top of every step, so
+  // staff can always discard the in-progress upload and start over without
+  // having to click "Back" through each step.
+  function screenHeaderHtml(title) {
+    return `
+      <div class="screen-header-row">
+        <h2>${title}</h2>
+        <button class="btn" id="reset-upload-btn" type="button">Reset</button>
+      </div>
+    `;
+  }
+
+  function wireResetBtn() {
+    container.querySelector("#reset-upload-btn")?.addEventListener("click", () => {
+      const hasProgress = !!(workbook || fileAWorkbook || fileBWorkbook || blocks.length > 0 || mergedRows.length > 0);
+      if (hasProgress && !confirm("Reset and discard the current upload? Nothing will be saved.")) return;
+      resetAll();
+    });
+  }
+
+  function resetAll() {
+    mode = "single";
+    step = "upload";
+    workbook = null;
+    sheetNames = [];
+    selectedSheet = "";
+    headers = [];
+    dataRows = [];
+    mapping = {};
+    fileAWorkbook = null;
+    fileASheetNames = [];
+    fileASelectedSheet = "";
+    fileAHeaders = [];
+    fileADataRows = [];
+    fileAMapping = {};
+    fileBWorkbook = null;
+    fileBSheetNames = [];
+    fileBSelectedSheet = "";
+    fileBHeaders = [];
+    fileBDataRows = [];
+    fileBMapping = {};
+    mergedRows = [];
+    defaultProviderId = "";
+    blocks = [];
+    busyMsg = "";
+    drawUploadStep();
+  }
+
   function drawUploadStep() {
     container.innerHTML = `
       <div class="screen">
-        <h2>Customer Excel Upload</h2>
+        ${screenHeaderHtml("Customer Excel Upload")}
         <p class="muted">Upload an Excel (.xlsx/.csv) file, or two files that share an Order Id column and need to be matched and merged first. Everything goes through column mapping and a review/confirm step before being saved as real customer and order data.</p>
+        <div class="card">
+          <label>Provider for this upload
+            <select id="provider-select-upload">
+              <option value="">(Not set — choose before uploading)</option>
+              ${providers.map((p) => `<option value="${p.id}" ${defaultProviderId === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+            </select>
+          </label>
+          <p class="muted">Applied to every row that doesn't specify (or can't be matched to) a provider of its own. You can still change it per line on the review screen.</p>
+        </div>
         <div class="tabs">
           <button data-mode="single" class="${mode === "single" ? "tab active" : "tab"}">Single File</button>
           <button data-mode="two" class="${mode === "two" ? "tab active" : "tab"}">Two Files (Service Info + Order Info)</button>
@@ -230,6 +287,10 @@ export async function renderCustomerUpload(container, ctx) {
       </div>
     `;
 
+    wireResetBtn();
+    container.querySelector("#provider-select-upload").addEventListener("change", (e) => {
+      defaultProviderId = e.target.value;
+    });
     container.querySelectorAll("[data-mode]").forEach((btn) => {
       btn.addEventListener("click", () => {
         mode = btn.dataset.mode;
@@ -314,7 +375,7 @@ export async function renderCustomerUpload(container, ctx) {
   function drawMappingStep() {
     container.innerHTML = `
       <div class="screen">
-        <h2>Step 2: Column Mapping &amp; Validation</h2>
+        ${screenHeaderHtml("Step 2: Column Mapping &amp; Validation")}
         <div class="card">
           <label>Select Sheet
             <select id="sheet-select">
@@ -347,7 +408,7 @@ export async function renderCustomerUpload(container, ctx) {
           <label>Default provider for rows with no/empty provider column
             <select id="default-provider">
               <option value="">(Not set)</option>
-              ${providers.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("")}
+              ${providers.map((p) => `<option value="${p.id}" ${defaultProviderId === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
             </select>
           </label>
           <div class="btn-row">
@@ -358,6 +419,7 @@ export async function renderCustomerUpload(container, ctx) {
       </div>
     `;
 
+    wireResetBtn();
     container.querySelector("#sheet-select").addEventListener("change", (e) => {
       selectedSheet = e.target.value;
       loadSheet(selectedSheet);
@@ -367,6 +429,9 @@ export async function renderCustomerUpload(container, ctx) {
       container.querySelector(`[data-field="${f.key}"]`).addEventListener("change", (e) => {
         mapping[f.key] = Number(e.target.value);
       });
+    });
+    container.querySelector("#default-provider").addEventListener("change", (e) => {
+      defaultProviderId = e.target.value;
     });
     container.querySelector("#back-btn").addEventListener("click", () => {
       step = "upload";
@@ -383,7 +448,7 @@ export async function renderCustomerUpload(container, ctx) {
   function drawMappingTwoStep() {
     container.innerHTML = `
       <div class="screen">
-        <h2>Step 2: Column Mapping (Two Files)</h2>
+        ${screenHeaderHtml("Step 2: Column Mapping (Two Files)")}
         <div class="card">
           <h3>Service Info File</h3>
           <label>Select Sheet
@@ -461,6 +526,7 @@ export async function renderCustomerUpload(container, ctx) {
       </div>
     `;
 
+    wireResetBtn();
     container.querySelector("#sheet-select-a").addEventListener("change", (e) => {
       fileASelectedSheet = e.target.value;
       loadSheetA(fileASelectedSheet);
@@ -785,7 +851,7 @@ export async function renderCustomerUpload(container, ctx) {
 
     container.innerHTML = `
       <div class="screen">
-        <h2>Step 3: Merge Result Review</h2>
+        ${screenHeaderHtml("Step 3: Merge Result Review")}
         <p class="muted">Matched ${mergedRows.length} order(s) by Order Id — ${matchedBothCount} found in both files, ${onlyACount} only in the Service Info file (missing Order Date), ${onlyBCount} only in the Order Info file (missing Product/Package)${
       multiLineCount ? `, ${multiLineCount} order(s) expanded into multiple service lines (e.g. mobile orders with several Order Number / Work Order values)` : ""
     }. ${reviewCount} row(s) marked "Please review" below need a look and are listed first — you can fix values here, or on the next screen where Units / Units Installed and Service/Provider selection per line can also be edited.</p>
@@ -844,6 +910,7 @@ export async function renderCustomerUpload(container, ctx) {
         </table>
       </div>
     `;
+    wireResetBtn();
     wireMergeReviewEvents();
   }
 
@@ -943,8 +1010,8 @@ export async function renderCustomerUpload(container, ctx) {
   function drawReviewStep() {
     container.innerHTML = `
       <div class="screen">
-        <h2>Step 3: Review &amp; Confirm</h2>
-        <p class="muted">Check and edit values for each customer block. Blocks that need a look — data missing from one file, a mismatch between the two files, or a possible duplicate customer — are marked "Please review" and listed first. Only entries you want saved need to stay checked.</p>
+        ${screenHeaderHtml("Step 3: Review &amp; Confirm")}
+        <p class="muted">Check and edit values for each customer block. Blocks that need a look — data missing from one file, a mismatch between the two files, or a possible duplicate customer — are marked "Please review" and listed first. Only entries you want saved need to stay checked. Use "Remove" on a block to drop it from this list entirely (it won't be saved and won't be counted); "Reset" above discards the whole upload and starts over.</p>
         ${salespersonDatalist()}
         <div class="btn-row">
           <button class="btn" id="add-block-btn">+ Add Customer Manually</button>
@@ -955,6 +1022,7 @@ export async function renderCustomerUpload(container, ctx) {
         <div id="blocks-wrap">${blocks.map((b) => blockCardHtml(b)).join("") || `<p class="muted">No customer data was loaded.</p>`}</div>
       </div>
     `;
+    wireResetBtn();
     wireReviewEvents();
   }
 
@@ -963,6 +1031,7 @@ export async function renderCustomerUpload(container, ctx) {
     <div class="card block-card ${b.excluded ? "excluded" : ""} ${b.needsReview ? "needs-review" : ""}" data-block="${b.id}">
       <div class="block-head">
         <label class="checkbox-inline"><input type="checkbox" class="b-include" ${b.excluded ? "" : "checked"} /> Include this customer</label>
+        <button class="btn small danger b-remove">Remove</button>
         ${
           b.needsReview
             ? `<span class="badge error">Please review: ${escapeHtml((b.reviewReasons || []).join(", "))}</span>`
@@ -1110,6 +1179,10 @@ export async function renderCustomerUpload(container, ctx) {
 
     container.querySelectorAll(".block-card").forEach((card) => {
       const b = blocks.find((x) => x.id === card.dataset.block);
+      card.querySelector(".b-remove").addEventListener("click", () => {
+        blocks = blocks.filter((x) => x.id !== b.id);
+        drawReviewStep();
+      });
       card.querySelector(".b-add-line").addEventListener("click", () => {
         readBlockFromCard(card, b);
         b.lines.push({
@@ -1279,5 +1352,6 @@ export async function renderCustomerUpload(container, ctx) {
     drawReviewStep();
   }
 
+  await loadMasters();
   drawUploadStep();
 }
