@@ -31,6 +31,11 @@ const FIELD_DEFS = [
     label: "Expected Commission",
     guesses: ["commission", "커미션", "amount", "금액"],
   },
+  {
+    key: "memo",
+    label: "Memo / Notes",
+    guesses: ["memo", "note", "notes", "비고", "메모"],
+  },
 ];
 
 // ---- Two-file merge mode: field definitions per source file. ----
@@ -646,6 +651,7 @@ export async function renderCustomerUpload(container, ctx) {
           address: String(cell(row, "address") ?? "").trim(),
           orderDate: normalizeDate(cell(row, "order_date")),
           salesperson: String(cell(row, "salesperson") ?? "").trim(),
+          memo: String(cell(row, "memo") ?? "").trim(),
           excluded: false,
           duplicate: { suspect: false, reason: "", matchedCustomerId: null, matchedCustomerLabel: null },
           linkToExisting: false,
@@ -1140,6 +1146,11 @@ export async function renderCustomerUpload(container, ctx) {
         <label>Salesperson<input type="text" class="b-sales" list="sp-list" value="${escapeHtml(b.salesperson)}" /></label>
         <label>Address<input type="text" class="b-address" value="${escapeHtml(b.address || "")}" /></label>
       </div>
+      ${
+        b.memo
+          ? `<label>Memo / Notes<textarea class="b-memo" rows="2" style="width:100%">${escapeHtml(b.memo)}</textarea></label>`
+          : ""
+      }
       <label class="checkbox-inline"><input type="checkbox" class="b-followup-needed" ${b.followUpNeeded ? "checked" : ""} /> Follow-up needed</label>
       ${
         b.followUpNeeded
@@ -1200,6 +1211,8 @@ export async function renderCustomerUpload(container, ctx) {
     b.salesperson = card.querySelector(".b-sales").value.trim();
     const addressEl = card.querySelector(".b-address");
     if (addressEl) b.address = addressEl.value.trim();
+    const memoEl = card.querySelector(".b-memo");
+    if (memoEl) b.memo = memoEl.value.trim();
     const linkEl = card.querySelector(".b-link-existing");
     if (linkEl) b.linkToExisting = linkEl.checked;
     b.followUpNeeded = card.querySelector(".b-followup-needed").checked;
@@ -1232,6 +1245,7 @@ export async function renderCustomerUpload(container, ctx) {
         address: "",
         orderDate: null,
         salesperson: "",
+        memo: "",
         excluded: false,
         duplicate: { suspect: false, reason: "", matchedCustomerId: null, matchedCustomerLabel: null },
         linkToExisting: false,
@@ -1450,6 +1464,7 @@ export async function renderCustomerUpload(container, ctx) {
               salesperson_id: salespersonId,
               order_date: b.orderDate,
               pipeline_stage: "confirmed",
+              memo: b.memo || null,
               created_by: ctx.profile.id,
               source_order_id: b.sourceOrderId ?? null,
               order_number: b.orderNumber ?? null,
