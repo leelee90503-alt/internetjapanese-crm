@@ -1,6 +1,6 @@
 import * as XLSX from "xlsx";
 import { supabase } from "./supabaseClient.js";
-import { checkDuplicateSuspect } from "./duplicateCheck.js";
+import { checkDuplicateSuspect, findExactDuplicateLine } from "./duplicateCheck.js";
 import {
   normalizeAccountNumber,
   normalizePhone,
@@ -12,6 +12,7 @@ import {
 const FIELD_DEFS = [
   { key: "name", label: "Name", guesses: ["name", "이름", "고객명", "customer"] },
   { key: "phone", label: "Phone", guesses: ["phone", "전화", "연락처", "tel"] },
+  { key: "address", label: "Address", guesses: ["address", "주소"] },
   {
     key: "account_number",
     label: "Account Number",
@@ -123,6 +124,36 @@ function joinAddress(address, city, state, zip) {
     (p) => p && String(p).trim() !== ""
   );
   return parts.join(", ");
+}
+
+// Fuzzy match a raw text value against a master list (services/providers) by
+// name or display_name — exact match first, then substring either direction.
+function matchMaster(list, rawValue) {
+  if (!rawValue) return null;
+  const norm = String(rawValue).trim().toLowerCase();
+  if (!norm) return null;
+  const hit = list.find(
+    (m) =>
+      m.name.toLowerCase() === norm ||
+      (m.display_name && m.display_name.toLowerCase() === norm) ||
+      m.name.toLowerCase().includes(norm) ||
+      norm.includes(m.name.toLowerCase())
+  );
+  return hit ? hit.id : null;
+}
+
+// Try a prioritized list of raw text candidates (e.g. Product, then Package,
+// then Package Group) against a master list, and report which candidate (if
+// any) was actually used and whether it matched — so a failed match can be
+// shown to staff with the exact text that didn't match, instead of quietly
+// disappearing behind a generic "?" in the saved data.
+function matchMasterPrioritized(list, rawValues) {
+  const candidates = (rawValues || []).filter((v) => v && String(v).trim() !== "");
+  for (const raw of candidates) {
+    const id = matchMaster(list, raw);
+    if (id) return { id, raw, matched: true };
+  }
+  return { id: null, raw: candidates[0] || null, matched: candidates.length === 0 };
 }
 
 export async function renderCustomerUpload(container, ctx) {
@@ -490,6 +521,7 @@ export async function renderCustomerUpload(container, ctx) {
           id: crypto.randomUUID(),
           name,
           phone: String(cell(row, "phone") ?? "").trim(),
+          address: String(cell(row, "address") ?? "").trim(),
           orderDate: normalizeDate(cell(row, "order_date")),
           salesperson: String(cell(row, "salesperson") ?? "").trim(),
           excluded: false,
@@ -506,13 +538,18 @@ export async function renderCustomerUpload(container, ctx) {
       }
       if (!current) continue; // skip rows with no name if they appear before any block starts (formatting error)
       const providerRaw = String(cell(row, "provider") ?? "").trim();
-      const provider = matchMaster(providers, providerRaw) || (defaultProviderId || null);
-      const service = matchMaster(services, String(cell(row, "service") ?? "").trim());
+      const providerMatch = matchMasterPrioritized(providers, [providerRaw]);
+      const provider = providerMatch.id || (defaultProviderId || null);
+      const serviceMatch = matchMasterPrioritized(services, [String(cell(row, "service") ?? "").trim()]);
       current.lines.push({
         id: crypto.randomUUID(),
         excluded: false,
-        serviceId: service,
+        serviceId: serviceMatch.id,
+        serviceMatched: serviceMatch.matched,
+        serviceRaw: serviceMatch.raw,
         providerId: provider,
+        providerMatched: providerMatch.matched,
+        providerRaw: providerMatch.raw,
         accountNumberRaw: String(cell(row, "account_number") ?? "").trim(),
         accountNumber: normalizeAccountNumber(cell(row, "account_number")),
         expectedCommission: Number(cell(row, "expected_commission")) || null,
@@ -522,6 +559,23 @@ export async function renderCustomerUpload(container, ctx) {
         mobileLinesInstalled: null,
         planName: null,
       });
+    }
+
+    // Surface Product/Service and Provider values that didn't match anything
+    // in the master lists — these previously saved silently as "?"; now
+    // they're flagged so staff can fix the master list or pick manually.
+    for (const b of blocks) {
+      const unmatchedServices = [
+        ...new Set(b.lines.filter((l) => l.serviceRaw && !l.serviceMatched).map((l) => l.serviceRaw)),
+      ];
+      const unmatchedProviders = [
+        ...new Set(b.lines.filter((l) => l.providerRaw && !l.providerMatched).map((l) => l.providerRaw)),
+      ];
+      const reasons = [];
+      if (unmatchedServices.length) reasons.push(`Service not matched: ${unmatchedServices.join(", ")}`);
+      if (unmatchedProviders.length) reasons.push(`Provider not matched: ${unmatchedProviders.join(", ")}`);
+      b.reviewReasons = reasons;
+      b.needsReview = reasons.length > 0;
     }
 
     // Duplicate-suspect check (name + phone + account number combination; order date is excluded from the criteria)
@@ -638,7 +692,17 @@ export async function renderCustomerUpload(container, ctx) {
           [getA(aRow, "product"), getA(aRow, "package"), getA(aRow, "package_group")]
             .filter((v) => v && String(v).trim() !== "")
             .join(" / ") || null;
+        // Product is the primary matching key (per the mapping reference the
+        // provider gave us); Package / Package Group are only fallbacks.
+        const serviceMatch = matchMasterPrioritized(services, [
+          getA(aRow, "product"),
+          getA(aRow, "package"),
+          getA(aRow, "package_group"),
+        ]);
         return {
+          serviceId: serviceMatch.id,
+          serviceMatched: serviceMatch.matched,
+          serviceRaw: serviceMatch.raw,
           accountNumber: normalizeAccountNumber(aAccount || bAccount),
           accountMismatch: !!(
             normalizeAccountNumber(aAccount) &&
@@ -683,11 +747,13 @@ export async function renderCustomerUpload(container, ctx) {
   }
 
   // A merged row needs a human look if it came from only one of the two
-  // source files, or if a field the two files both reported disagrees.
+  // source files, if a field the two files both reported disagrees, or if a
+  // line's Product/Package didn't match anything in the Services master list.
   function rowNeedsReview(r) {
     const anyAccountMismatch = r.lines.some((l) => l.accountMismatch);
     const anyUnitsMismatch = r.lines.some((l) => l.unitsMismatch);
     const anyUnitsInstalledMismatch = r.lines.some((l) => l.unitsInstalledMismatch);
+    const anyServiceUnmatched = r.lines.some((l) => l.serviceRaw && !l.serviceMatched);
     return !!(
       r.onlyInA ||
       r.onlyInB ||
@@ -695,7 +761,8 @@ export async function renderCustomerUpload(container, ctx) {
       r.phoneMismatch ||
       anyAccountMismatch ||
       anyUnitsMismatch ||
-      anyUnitsInstalledMismatch
+      anyUnitsInstalledMismatch ||
+      anyServiceUnmatched
     );
   }
 
@@ -737,8 +804,16 @@ export async function renderCustomerUpload(container, ctx) {
                   const anyAccountMismatch = r.lines.some((l) => l.accountMismatch);
                   const anyUnitsMismatch = r.lines.some((l) => l.unitsMismatch);
                   const anyUnitsInstalledMismatch = r.lines.some((l) => l.unitsInstalledMismatch);
+                  const unmatchedServices = [
+                    ...new Set(r.lines.filter((l) => l.serviceRaw && !l.serviceMatched).map((l) => l.serviceRaw)),
+                  ];
                   const noFlags =
-                    !r.nameMismatch && !r.phoneMismatch && !anyAccountMismatch && !anyUnitsMismatch && !anyUnitsInstalledMismatch;
+                    !r.nameMismatch &&
+                    !r.phoneMismatch &&
+                    !anyAccountMismatch &&
+                    !anyUnitsMismatch &&
+                    !anyUnitsInstalledMismatch &&
+                    unmatchedServices.length === 0;
                   const needsReview = rowNeedsReview(r);
                   return `
               <tr data-mrow="${r.id}" class="${r.excluded ? "excluded" : ""} ${needsReview ? "needs-review-row" : ""}">
@@ -758,6 +833,7 @@ export async function renderCustomerUpload(container, ctx) {
                   ${anyAccountMismatch ? `<span class="badge error">Account # differs</span>` : ""}
                   ${anyUnitsMismatch ? `<span class="badge error">Units differ</span>` : ""}
                   ${anyUnitsInstalledMismatch ? `<span class="badge error">Units Installed differ</span>` : ""}
+                  ${unmatchedServices.length ? `<span class="badge error">Service not matched: ${escapeHtml(unmatchedServices.join(", "))}</span>` : ""}
                   ${noFlags ? `<span class="muted">-</span>` : ""}
                 </td>
               </tr>`;
@@ -795,6 +871,9 @@ export async function renderCustomerUpload(container, ctx) {
       const anyAccountMismatch = r.lines.some((l) => l.accountMismatch);
       const anyUnitsMismatch = r.lines.some((l) => l.unitsMismatch);
       const anyUnitsInstalledMismatch = r.lines.some((l) => l.unitsInstalledMismatch);
+      const unmatchedServices = [
+        ...new Set(r.lines.filter((l) => l.serviceRaw && !l.serviceMatched).map((l) => l.serviceRaw)),
+      ];
       const reviewReasons = [];
       if (r.onlyInA) reviewReasons.push("Only in Service Info file (Order Date missing)");
       if (r.onlyInB) reviewReasons.push("Only in Order Info file (Product/Package missing)");
@@ -803,10 +882,13 @@ export async function renderCustomerUpload(container, ctx) {
       if (anyAccountMismatch) reviewReasons.push("Account # differs between files");
       if (anyUnitsMismatch) reviewReasons.push("Units differ between files");
       if (anyUnitsInstalledMismatch) reviewReasons.push("Units Installed differ between files");
+      if (unmatchedServices.length) reviewReasons.push(`Service not matched: ${unmatchedServices.join(", ")}`);
+      if (!defaultProviderId) reviewReasons.push("Provider not selected — pick a default provider or set it per line below");
       blocks.push({
         id: crypto.randomUUID(),
         name: r.name || "",
         phone: r.phone || "",
+        address: r.address || "",
         orderDate: r.orderDate,
         salesperson: r.salesperson || "",
         excluded: false,
@@ -820,9 +902,12 @@ export async function renderCustomerUpload(container, ctx) {
         lines: r.lines.map((l) => ({
           id: crypto.randomUUID(),
           excluded: false,
-          serviceId:
-            matchMaster(services, l.packageGroup) || matchMaster(services, l.package) || matchMaster(services, l.product),
+          serviceId: l.serviceId,
+          serviceMatched: l.serviceMatched,
+          serviceRaw: l.serviceRaw,
           providerId: defaultProviderId || null,
+          providerMatched: true,
+          providerRaw: null,
           accountNumberRaw: l.accountNumber || "",
           accountNumber: l.accountNumber || "",
           expectedCommission: null,
@@ -847,19 +932,6 @@ export async function renderCustomerUpload(container, ctx) {
     }
 
     sortBlocksByReviewPriority();
-  }
-
-  function matchMaster(list, rawValue) {
-    if (!rawValue) return null;
-    const norm = rawValue.trim().toLowerCase();
-    const hit = list.find(
-      (m) =>
-        m.name.toLowerCase() === norm ||
-        (m.display_name && m.display_name.toLowerCase() === norm) ||
-        m.name.toLowerCase().includes(norm) ||
-        norm.includes(m.name.toLowerCase())
-    );
-    return hit ? hit.id : null;
   }
 
   function salespersonDatalist() {
@@ -914,6 +986,7 @@ export async function renderCustomerUpload(container, ctx) {
         <label>Phone<input type="text" class="b-phone" value="${escapeHtml(b.phone)}" /></label>
         <label>Order Date<input type="date" class="b-date" value="${b.orderDate || ""}" /></label>
         <label>Salesperson<input type="text" class="b-sales" list="sp-list" value="${escapeHtml(b.salesperson)}" /></label>
+        <label>Address<input type="text" class="b-address" value="${escapeHtml(b.address || "")}" /></label>
       </div>
       <table class="data-table small">
         <thead><tr><th>Include</th><th>Service</th><th>Provider</th><th>Account #</th><th>Units</th><th>Units Installed</th><th>Expected Commission</th><th></th></tr></thead>
@@ -926,11 +999,28 @@ export async function renderCustomerUpload(container, ctx) {
               <td><select class="l-service">
                 <option value="">(Select)</option>
                 ${services.map((s) => `<option value="${s.id}" ${l.serviceId === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("")}
-              </select></td>
+              </select>
+              ${
+                l.serviceRaw && !l.serviceMatched
+                  ? `<div class="hint-error">No match for "${escapeHtml(l.serviceRaw)}" — select manually or add it in Master Data</div>`
+                  : ""
+              }
+              </td>
               <td><select class="l-provider">
                 <option value="">(Select)</option>
                 ${providers.map((p) => `<option value="${p.id}" ${l.providerId === p.id ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
-              </select></td>
+              </select>
+              ${
+                l.providerRaw && !l.providerMatched
+                  ? `<div class="hint-error">No match for "${escapeHtml(l.providerRaw)}" — select manually or add it in Master Data</div>`
+                  : ""
+              }
+              ${
+                !l.providerId
+                  ? `<div class="hint-error">No provider selected</div>`
+                  : ""
+              }
+              </td>
               <td><input type="text" class="l-account" value="${escapeHtml(l.accountNumber)}" /></td>
               <td><input type="number" class="l-units" value="${l.units ?? ""}" style="width:60px" /></td>
               <td><input type="number" class="l-units-installed" value="${l.unitsInstalled ?? ""}" style="width:60px" /></td>
@@ -951,6 +1041,8 @@ export async function renderCustomerUpload(container, ctx) {
     b.phone = card.querySelector(".b-phone").value.trim();
     b.orderDate = card.querySelector(".b-date").value || null;
     b.salesperson = card.querySelector(".b-sales").value.trim();
+    const addressEl = card.querySelector(".b-address");
+    if (addressEl) b.address = addressEl.value.trim();
     const linkEl = card.querySelector(".b-link-existing");
     if (linkEl) b.linkToExisting = linkEl.checked;
     card.querySelectorAll("tr[data-line]").forEach((tr) => {
@@ -975,6 +1067,7 @@ export async function renderCustomerUpload(container, ctx) {
         id: crypto.randomUUID(),
         name: "",
         phone: "",
+        address: "",
         orderDate: null,
         salesperson: "",
         excluded: false,
@@ -990,7 +1083,11 @@ export async function renderCustomerUpload(container, ctx) {
             id: crypto.randomUUID(),
             excluded: false,
             serviceId: null,
+            serviceMatched: true,
+            serviceRaw: null,
             providerId: null,
+            providerMatched: true,
+            providerRaw: null,
             accountNumberRaw: "",
             accountNumber: "",
             expectedCommission: null,
@@ -1019,7 +1116,11 @@ export async function renderCustomerUpload(container, ctx) {
           id: crypto.randomUUID(),
           excluded: false,
           serviceId: null,
+          serviceMatched: true,
+          serviceRaw: null,
           providerId: null,
+          providerMatched: true,
+          providerRaw: null,
           accountNumberRaw: "",
           accountNumber: "",
           expectedCommission: null,
@@ -1060,11 +1161,38 @@ export async function renderCustomerUpload(container, ctx) {
     drawReviewStep();
 
     let successCount = 0;
+    let skippedBlockCount = 0;
+    let skippedLineCount = 0;
     const errors = [];
 
     for (const b of toConfirm) {
       try {
         if (!b.name) throw new Error("Name is required.");
+
+        // Exact-duplicate check: an Account Number + Customer Full Name +
+        // Service (Product/Package) combination that already exists in the
+        // system is skipped instead of saved again.
+        const candidateLines = b.lines.filter((l) => !l.excluded);
+        const nonDupLines = [];
+        for (const l of candidateLines) {
+          const isDup = await findExactDuplicateLine({
+            accountNumber: l.accountNumber,
+            customerName: b.name,
+            serviceId: l.serviceId,
+          });
+          if (isDup) {
+            skippedLineCount++;
+            continue;
+          }
+          nonDupLines.push(l);
+        }
+        if (candidateLines.length > 0 && nonDupLines.length === 0) {
+          // Every included line on this block is already saved — skip the
+          // whole block rather than creating an empty duplicate order.
+          skippedBlockCount++;
+          b.savedOk = true;
+          continue;
+        }
 
         // Salesperson: reuse an existing name (case-insensitive match), otherwise create a new one
         let salespersonId = null;
@@ -1093,7 +1221,7 @@ export async function renderCustomerUpload(container, ctx) {
         } else {
           const { data: newCust, error: custErr } = await supabase
             .from("customers")
-            .insert({ name: b.name, phone: b.phone, registered_by: ctx.profile.id })
+            .insert({ name: b.name, phone: b.phone, address: b.address || null, registered_by: ctx.profile.id })
             .select()
             .single();
           if (custErr) throw custErr;
@@ -1117,21 +1245,19 @@ export async function renderCustomerUpload(container, ctx) {
           .single();
         if (orderErr) throw orderErr;
 
-        const lineRows = b.lines
-          .filter((l) => !l.excluded)
-          .map((l) => ({
-            order_id: newOrder.id,
-            service_id: l.serviceId || null,
-            provider_id: l.providerId || null,
-            plan_name: l.planName ?? null,
-            account_number: l.accountNumber || null,
-            expected_commission: l.expectedCommission,
-            units: l.units ?? null,
-            units_installed: l.unitsInstalled ?? null,
-            mobile_lines_ordered: l.mobileLinesOrdered ?? null,
-            mobile_lines_installed: l.mobileLinesInstalled ?? null,
-            status: "pending",
-          }));
+        const lineRows = nonDupLines.map((l) => ({
+          order_id: newOrder.id,
+          service_id: l.serviceId || null,
+          provider_id: l.providerId || null,
+          plan_name: l.planName ?? null,
+          account_number: l.accountNumber || null,
+          expected_commission: l.expectedCommission,
+          units: l.units ?? null,
+          units_installed: l.unitsInstalled ?? null,
+          mobile_lines_ordered: l.mobileLinesOrdered ?? null,
+          mobile_lines_installed: l.mobileLinesInstalled ?? null,
+          status: "pending",
+        }));
         if (lineRows.length > 0) {
           const { error: lineErr } = await supabase.from("order_service_lines").insert(lineRows);
           if (lineErr) throw lineErr;
@@ -1147,6 +1273,8 @@ export async function renderCustomerUpload(container, ctx) {
     blocks = blocks.filter((b) => !b.savedOk);
     busyMsg =
       `${successCount} saved.` +
+      (skippedBlockCount ? ` ${skippedBlockCount} customer(s) skipped (already saved — same Account Number + Name + Service).` : "") +
+      (skippedLineCount ? ` ${skippedLineCount} line(s) skipped as duplicates.` : "") +
       (errors.length ? ` ${errors.length} failed: ` + errors.join(" / ") : "");
     drawReviewStep();
   }

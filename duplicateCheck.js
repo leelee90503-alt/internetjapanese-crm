@@ -56,3 +56,26 @@ export async function checkDuplicateSuspect({ name, phone, accountNumber }) {
     matchedCustomerLabel,
   };
 }
+
+// Exact-duplicate check used right before saving: if a service line with the
+// same Account Number + Service (Product/Package) already exists under a
+// customer with the same name, treat this line as already saved and skip
+// inserting it again. Unlike checkDuplicateSuspect (which only warns and
+// lets staff decide), this one is a hard skip — the combination the request
+// asked to de-dupe on (Account Number + Customer Full Name + Product/Package)
+// leaves no ambiguity for staff to resolve.
+export async function findExactDuplicateLine({ accountNumber, customerName, serviceId }) {
+  const normAccount = normalizeAccountNumber(accountNumber);
+  const normName = (customerName || "").trim().toLowerCase();
+  if (!normAccount || !serviceId || !normName) return false;
+
+  const { data, error } = await supabase
+    .from("order_service_lines")
+    .select("id, account_number, service_id, orders(customers(name))")
+    .eq("account_number", normAccount)
+    .eq("service_id", serviceId)
+    .limit(20);
+  if (error || !data) return false;
+
+  return data.some((row) => (row.orders?.customers?.name || "").trim().toLowerCase() === normName);
+}
