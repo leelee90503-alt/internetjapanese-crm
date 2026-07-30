@@ -498,6 +498,8 @@ export async function renderCustomerUpload(container, ctx) {
           sourceOrderId: null,
           orderNumber: null,
           category: null,
+          needsReview: false,
+          reviewReasons: [],
           lines: [],
         };
         blocks.push(current);
@@ -532,6 +534,19 @@ export async function renderCustomerUpload(container, ctx) {
       });
       b.duplicate = res;
     }
+
+    sortBlocksByReviewPriority();
+  }
+
+  // Blocks that need a human look — merge mismatches/missing data from the
+  // two-file merge, or a possible duplicate customer — float to the top so
+  // they aren't missed among rows that are already clean.
+  function sortBlocksByReviewPriority() {
+    blocks.sort((a, b) => {
+      const aFlag = a.needsReview || a.duplicate.suspect ? 1 : 0;
+      const bFlag = b.needsReview || b.duplicate.suspect ? 1 : 0;
+      return bFlag - aFlag;
+    });
   }
 
   // ---- two-file merge ----
@@ -747,6 +762,17 @@ export async function renderCustomerUpload(container, ctx) {
   async function buildBlocksFromMerge() {
     blocks = [];
     for (const r of mergedRows.filter((x) => !x.excluded)) {
+      const anyAccountMismatch = r.lines.some((l) => l.accountMismatch);
+      const anyUnitsMismatch = r.lines.some((l) => l.unitsMismatch);
+      const anyUnitsInstalledMismatch = r.lines.some((l) => l.unitsInstalledMismatch);
+      const reviewReasons = [];
+      if (r.onlyInA) reviewReasons.push("Only in Service Info file (Order Date missing)");
+      if (r.onlyInB) reviewReasons.push("Only in Order Info file (Product/Package missing)");
+      if (r.nameMismatch) reviewReasons.push("Name differs between files");
+      if (r.phoneMismatch) reviewReasons.push("Phone differs between files");
+      if (anyAccountMismatch) reviewReasons.push("Account # differs between files");
+      if (anyUnitsMismatch) reviewReasons.push("Units differ between files");
+      if (anyUnitsInstalledMismatch) reviewReasons.push("Units Installed differ between files");
       blocks.push({
         id: crypto.randomUUID(),
         name: r.name || "",
@@ -759,6 +785,8 @@ export async function renderCustomerUpload(container, ctx) {
         sourceOrderId: r.orderId,
         orderNumber: r.lines.map((l) => l.orderNumber).filter(Boolean).join(", ") || null,
         category: r.category || null,
+        needsReview: reviewReasons.length > 0,
+        reviewReasons,
         lines: r.lines.map((l) => ({
           id: crypto.randomUUID(),
           excluded: false,
@@ -787,6 +815,8 @@ export async function renderCustomerUpload(container, ctx) {
       });
       b.duplicate = res;
     }
+
+    sortBlocksByReviewPriority();
   }
 
   function matchMaster(list, rawValue) {
@@ -812,7 +842,7 @@ export async function renderCustomerUpload(container, ctx) {
     container.innerHTML = `
       <div class="screen">
         <h2>Step 3: Review &amp; Confirm</h2>
-        <p class="muted">Check and edit values for each customer block. If a "Possible Duplicate" badge appears, compare it yourself and decide whether it's really a duplicate. Only entries you want saved need to stay checked.</p>
+        <p class="muted">Check and edit values for each customer block. Blocks that need a look — data missing from one file, a mismatch between the two files, or a possible duplicate customer — are marked "Please review" and listed first. Only entries you want saved need to stay checked.</p>
         ${salespersonDatalist()}
         <div class="btn-row">
           <button class="btn" id="add-block-btn">+ Add Customer Manually</button>
@@ -828,9 +858,14 @@ export async function renderCustomerUpload(container, ctx) {
 
   function blockCardHtml(b) {
     return `
-    <div class="card block-card ${b.excluded ? "excluded" : ""}" data-block="${b.id}">
+    <div class="card block-card ${b.excluded ? "excluded" : ""} ${b.needsReview ? "needs-review" : ""}" data-block="${b.id}">
       <div class="block-head">
         <label class="checkbox-inline"><input type="checkbox" class="b-include" ${b.excluded ? "" : "checked"} /> Include this customer</label>
+        ${
+          b.needsReview
+            ? `<span class="badge error">Please review: ${escapeHtml((b.reviewReasons || []).join(", "))}</span>`
+            : ""
+        }
         ${
           b.duplicate.suspect
             ? `<span class="badge warn">Possible duplicate: ${escapeHtml(b.duplicate.reason)}${
@@ -918,6 +953,8 @@ export async function renderCustomerUpload(container, ctx) {
         sourceOrderId: null,
         orderNumber: null,
         category: null,
+        needsReview: false,
+        reviewReasons: [],
         lines: [
           {
             id: crypto.randomUUID(),
