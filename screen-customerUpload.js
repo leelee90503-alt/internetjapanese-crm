@@ -168,6 +168,45 @@ function matchMasterPrioritized(list, rawValues) {
   return { id: null, raw: candidates[0] || null, matched: candidates.length === 0 };
 }
 
+// ---- Commission rate auto-lookup (Master Data > Commission Rates) ----
+// Looks up the $ amount for a given provider + plan name so "Expected
+// Commission" can be pre-filled during upload instead of typed by hand.
+// Staff can still edit the value in the review grid before saving either way.
+function isMobileText(s) {
+  return String(s || "").trim().toLowerCase() === "mobile";
+}
+
+function lookupCommissionRate(commissionRates, providerId, planName) {
+  if (!providerId || !planName) return null;
+  const target = String(planName).trim().toLowerCase();
+  if (!target) return null;
+  const match = commissionRates.find(
+    (r) => r.provider_id === providerId && String(r.plan_name).trim().toLowerCase() === target
+  );
+  return match ? Number(match.rate) : null;
+}
+
+// `candidates` is a prioritized list of raw text fields that might hold the
+// plan/package name (e.g. Product, then Package, then Package Group, then
+// the free-text Service value) -- the first one with an exact match in the
+// commission rate table wins. Mobile lines are a special case: the source
+// data usually just says "Mobile" with no specific plan name, so the $
+// amount instead depends on which mobile line number this is within the
+// order (1st line priced differently from the 2nd+, per the rate table's
+// "Mobile Line 1" / "Mobile Line 2" ... rows) -- `mobileLineIndex` is that
+// 1-based position, tracked by the caller per block/order.
+function autoLookupCommission(commissionRates, providerId, candidates, mobileLineIndex) {
+  const list = (candidates || []).filter((v) => v && String(v).trim() !== "");
+  if (list.some((c) => isMobileText(c))) {
+    return mobileLineIndex ? lookupCommissionRate(commissionRates, providerId, `Mobile Line ${mobileLineIndex}`) : null;
+  }
+  for (const c of list) {
+    const rate = lookupCommissionRate(commissionRates, providerId, c);
+    if (rate !== null) return rate;
+  }
+  return null;
+}
+
 export async function renderCustomerUpload(container, ctx) {
   let mode = "single"; // "single" | "two"
   let step = "upload"; // upload -> mapping -> review (single mode); upload -> mappingTwo -> mergeReview -> review (two-file mode)
@@ -200,17 +239,20 @@ export async function renderCustomerUpload(container, ctx) {
   let services = [];
   let providers = [];
   let salespeople = [];
+  let commissionRates = [];
   let busyMsg = "";
 
   async function loadMasters() {
-    const [s, p, sp] = await Promise.all([
+    const [s, p, sp, cr] = await Promise.all([
       supabase.from("services").select("*").eq("is_active", true).order("sort_order"),
       supabase.from("providers").select("*").eq("is_active", true).order("name"),
       supabase.from("salespeople").select("*").eq("is_active", true).order("name"),
+      supabase.from("commission_rates").select("provider_id, plan_name, rate").eq("is_active", true),
     ]);
     services = s.data || [];
     providers = p.data || [];
     salespeople = sp.data || [];
+    commissionRates = cr.data || [];
   }
 
   // Shared header (title + Reset) rendered at the top of every step, so
@@ -591,10 +633,12 @@ export async function renderCustomerUpload(container, ctx) {
   async function buildBlocks() {
     blocks = [];
     let current = null;
+    let mobileLineCounter = 0; // resets per block -- see autoLookupCommission
     for (const row of dataRows) {
       const name = String(cell(row, "name") ?? "").trim();
       const isNewBlock = name !== "";
       if (isNewBlock) {
+        mobileLineCounter = 0;
         current = {
           id: crypto.randomUUID(),
           name,
@@ -627,6 +671,8 @@ export async function renderCustomerUpload(container, ctx) {
       // into Master Data on save if it's new), so it always reflects the
       // source file instead of "?" or a fuzzy-matched substitute.
       const serviceName = String(cell(row, "service") ?? "").trim();
+      if (isMobileText(serviceName)) mobileLineCounter += 1;
+      const expectedCommissionFromFile = Number(cell(row, "expected_commission")) || null;
       current.lines.push({
         id: crypto.randomUUID(),
         excluded: false,
@@ -636,7 +682,12 @@ export async function renderCustomerUpload(container, ctx) {
         providerRaw: providerMatch.raw,
         accountNumberRaw: String(cell(row, "account_number") ?? "").trim(),
         accountNumber: normalizeAccountNumber(cell(row, "account_number")),
-        expectedCommission: Number(cell(row, "expected_commission")) || null,
+        // The uploaded file's own Expected Commission column wins if present;
+        // otherwise auto-look-up the $ amount from Master Data > Commission
+        // Rates by provider + plan name (staff can still edit it below).
+        expectedCommission:
+          expectedCommissionFromFile ??
+          autoLookupCommission(commissionRates, provider, [serviceName], mobileLineCounter),
         units: null,
         unitsInstalled: null,
         mobileLinesOrdered: null,
@@ -973,22 +1024,38 @@ export async function renderCustomerUpload(container, ctx) {
         followUpNeeded: false,
         followUpDate: null,
         followUpReason: "",
-        lines: r.lines.map((l) => ({
-          id: crypto.randomUUID(),
-          excluded: false,
-          serviceName: l.serviceName,
-          providerId: defaultProviderId || null,
-          providerMatched: true,
-          providerRaw: null,
-          accountNumberRaw: l.accountNumber || "",
-          accountNumber: l.accountNumber || "",
-          expectedCommission: null,
-          units: l.units,
-          unitsInstalled: l.unitsInstalled,
-          mobileLinesOrdered: l.mobileLinesOrdered,
-          mobileLinesInstalled: l.mobileLinesInstalled,
-          planName: l.planName,
-        })),
+        lines: (() => {
+          let mobileLineCounter = 0; // resets per order/block -- see autoLookupCommission
+          return r.lines.map((l) => {
+            if (isMobileText(l.product) || isMobileText(l.package) || isMobileText(l.packageGroup) || isMobileText(l.serviceName)) {
+              mobileLineCounter += 1;
+            }
+            return {
+              id: crypto.randomUUID(),
+              excluded: false,
+              serviceName: l.serviceName,
+              providerId: defaultProviderId || null,
+              providerMatched: true,
+              providerRaw: null,
+              accountNumberRaw: l.accountNumber || "",
+              accountNumber: l.accountNumber || "",
+              // No Expected Commission column in this format -- always
+              // auto-look-up the $ amount from Master Data > Commission
+              // Rates by provider + plan name (staff can still edit it below).
+              expectedCommission: autoLookupCommission(
+                commissionRates,
+                defaultProviderId || null,
+                [l.product, l.package, l.packageGroup, l.planName, l.serviceName],
+                mobileLineCounter
+              ),
+              units: l.units,
+              unitsInstalled: l.unitsInstalled,
+              mobileLinesOrdered: l.mobileLinesOrdered,
+              mobileLinesInstalled: l.mobileLinesInstalled,
+              planName: l.planName,
+            };
+          });
+        })(),
       });
     }
 
