@@ -5,12 +5,14 @@ import { renderMasterData } from "./screen-masterData.js";
 import { renderCustomerUpload } from "./screen-customerUpload.js";
 import { renderOrders } from "./screen-orders.js";
 import { renderStaff } from "./screen-staff.js";
+import { renderCommissionReports } from "./screen-commissionReports.js";
 import { escapeHtml } from "./normalize.js";
 
 const ROUTES = [
   { path: "#/dashboard", label: "Dashboard", render: renderDashboard, adminOnly: false },
   { path: "#/upload", label: "Customer Excel Upload", render: renderCustomerUpload, adminOnly: false },
   { path: "#/orders", label: "Customers / Orders", render: renderOrders, adminOnly: false },
+  { path: "#/commission-reports", label: "Commission Reports", render: renderCommissionReports, adminOnly: true },
   { path: "#/master-data", label: "Master Data", render: renderMasterData, adminOnly: false },
   { path: "#/staff", label: "Staff Management", render: renderStaff, adminOnly: true },
 ];

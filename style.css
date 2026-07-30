@@ -80,5 +80,10 @@ input[type="number"], select {
 .block-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
 .badge { padding: 3px 8px; border-radius: 999px; font-size: 0.8em; }
 .badge.warn { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+.badge.ok { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+.badge.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+.badge.neutral { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
 .grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px 0; }
 .grid4 label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85em; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 10px 0; }
+.grid3 label { display: flex; flex-direction: column; gap: 4px; font-size: 0.85em; }

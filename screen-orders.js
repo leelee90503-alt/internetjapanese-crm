@@ -1,7 +1,15 @@
 import { supabase } from "./supabaseClient.js";
 import { escapeHtml, fmtMoney } from "./normalize.js";
 
+function commissionBadge(status) {
+  if (status === "received") return `<span class="badge ok">Received</span>`;
+  if (status === "mismatch") return `<span class="badge error">Mismatch</span>`;
+  if (status === "no_report") return `<span class="badge neutral">No Report</span>`;
+  return `<span class="badge warn">Pending</span>`;
+}
+
 export async function renderOrders(container, ctx) {
+  const isAdmin = ctx.profile?.role === "admin";
   let search = "";
   let orders = [];
 
@@ -12,7 +20,7 @@ export async function renderOrders(container, ctx) {
         `id, order_date, pipeline_stage, memo,
          customers(id, name, phone),
          salespeople(id, name),
-         order_service_lines(id, account_number, expected_commission, status, services(name), providers(name))`
+         order_service_lines(id, account_number, expected_commission, actual_commission_amount, status, services(name), providers(name))`
       )
       .order("order_date", { ascending: false });
     const { data, error } = await query;
@@ -44,7 +52,9 @@ export async function renderOrders(container, ctx) {
         <input type="text" id="search" placeholder="Search by name/phone/salesperson/account number" value="${escapeHtml(search)}" />
         <table class="data-table">
           <thead>
-            <tr><th>Order Date</th><th>Customer Name</th><th>Phone</th><th>Salesperson</th><th>Service Items</th><th>Status</th></tr>
+            <tr><th>Order Date</th><th>Customer Name</th><th>Phone</th><th>Salesperson</th><th>Service Items</th><th>Status</th>${
+              isAdmin ? "<th>Commission</th>" : ""
+            }</tr>
           </thead>
           <tbody>
             ${
@@ -65,9 +75,21 @@ export async function renderOrders(container, ctx) {
                   )
                   .join(", ") || "-"}</td>
                 <td>${escapeHtml(o.pipeline_stage)}</td>
+                ${
+                  isAdmin
+                    ? `<td>${
+                        (o.order_service_lines || [])
+                          .map(
+                            (l) =>
+                              `${commissionBadge(l.status)} ${fmtMoney(l.actual_commission_amount)} / exp. ${fmtMoney(l.expected_commission)}`
+                          )
+                          .join("<br/>") || "-"
+                      }</td>`
+                    : ""
+                }
               </tr>`
                 )
-                .join("") || `<tr><td colspan="6" class="muted">No data.</td></tr>`
+                .join("") || `<tr><td colspan="${isAdmin ? 7 : 6}" class="muted">No data.</td></tr>`
             }
           </tbody>
         </table>
