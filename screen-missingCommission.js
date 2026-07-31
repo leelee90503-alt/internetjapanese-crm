@@ -55,6 +55,7 @@ export async function renderMissingCommission(container, ctx) {
   let lines = [];
   let loadError = null;
   let busy = false;
+  let searchTerm = "";
 
   // Legacy items from the old missing_commission_items workflow (manual
   // 24-item upload etc.) that are still open. Shown in a separate section
@@ -84,6 +85,18 @@ export async function renderMissingCommission(container, ctx) {
       .eq("resolved", false)
       .order("created_at", { ascending: false });
     legacyItems = legacy || [];
+  }
+
+  function filteredLines() {
+    if (!searchTerm.trim()) return lines;
+    const needle = searchTerm.trim().toLowerCase();
+    return lines.filter((l) => {
+      const name = (l.orders?.customers?.name || "").toLowerCase();
+      const acct = (l.account_number || "").toString().toLowerCase();
+      const plan = (l.plan_name || "").toLowerCase();
+      const provider = (l.providers?.name || "").toLowerCase();
+      return name.includes(needle) || acct.includes(needle) || plan.includes(needle) || provider.includes(needle);
+    });
   }
 
   function rowHtml(l) {
@@ -124,7 +137,16 @@ export async function renderMissingCommission(container, ctx) {
   }
 
   function draw() {
-    const totalExpected = lines.reduce((s, l) => s + (Number(l.expected_commission) || 0), 0);
+    // Preserve focus/cursor position in the search box across the innerHTML
+    // replacement below -- otherwise every keystroke re-renders the DOM and
+    // drops focus, so only the first character of anything typed lands.
+    const active = document.activeElement;
+    const activeId = active && container.contains(active) ? active.id : null;
+    const activeSelStart = activeId && "selectionStart" in active ? active.selectionStart : null;
+    const activeSelEnd = activeId && "selectionEnd" in active ? active.selectionEnd : null;
+
+    const rows = filteredLines();
+    const totalExpected = rows.reduce((s, l) => s + (Number(l.expected_commission) || 0), 0);
 
     container.innerHTML = `
       <div class="screen">
@@ -138,9 +160,13 @@ export async function renderMissingCommission(container, ctx) {
         ${loadError ? `<div class="alert error">Failed to load: ${escapeHtml(loadError)}</div>` : ""}
 
         <div class="inline-form">
-          <span class="badge error">${lines.length} confirmed missing</span>
+          <span class="badge error">Total: ${rows.length} confirmed missing${searchTerm.trim() ? ` (filtered from ${lines.length})` : ""}</span>
           <span class="badge neutral">Total expected: ${fmtMoney(totalExpected)}</span>
           <button class="btn small" id="mc-download-btn">Download Excel</button>
+        </div>
+
+        <div class="inline-form">
+          <input type="text" placeholder="Search customer / account / plan / provider" id="mc-search" value="${escapeHtml(searchTerm)}" style="flex:1" />
         </div>
 
         <table class="data-table">
@@ -151,7 +177,7 @@ export async function renderMissingCommission(container, ctx) {
             </tr>
           </thead>
           <tbody>
-            ${lines.map(rowHtml).join("") || `<tr><td colspan="8" class="muted">Nothing confirmed missing right now.</td></tr>`}
+            ${rows.map(rowHtml).join("") || `<tr><td colspan="8" class="muted">${searchTerm.trim() ? "No matches for this search." : "Nothing confirmed missing right now."}</td></tr>`}
           </tbody>
         </table>
 
@@ -179,15 +205,35 @@ export async function renderMissingCommission(container, ctx) {
     `;
 
     wireEvents();
+
+    if (activeId) {
+      const toRefocus = container.querySelector(`#${activeId}`);
+      if (toRefocus) {
+        toRefocus.focus();
+        if (activeSelStart !== null && "setSelectionRange" in toRefocus) {
+          try {
+            toRefocus.setSelectionRange(activeSelStart, activeSelEnd);
+          } catch {
+            // some input types don't support setSelectionRange -- ignore
+          }
+        }
+      }
+    }
   }
 
   function wireEvents() {
+    container.querySelector("#mc-search")?.addEventListener("input", (e) => {
+      searchTerm = e.target.value;
+      draw();
+    });
+
     container.querySelector("#mc-download-btn")?.addEventListener("click", () => {
-      if (lines.length === 0) {
+      const rows = filteredLines();
+      if (rows.length === 0) {
         alert("Nothing to download.");
         return;
       }
-      downloadAsExcel(lines);
+      downloadAsExcel(rows);
     });
 
     container.querySelectorAll("[data-back-to-pending]").forEach((btn) => {
