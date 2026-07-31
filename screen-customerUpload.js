@@ -181,6 +181,21 @@ function isMobileText(s) {
   return String(s || "").trim().toLowerCase() === "mobile";
 }
 
+// TV service (TV Choice / TV Stream / TV Select Plus / TV Essentials / ...)
+// is normally bundled with a Xumo box, which generates its own separate
+// commission line on the provider's commission report. Staff frequently
+// don't note "Xumo" explicitly when entering the order, so a TV line auto-
+// adds a companion Xumo line (still editable/removable in the review grid)
+// so future commission reports have something to match against instead of
+// silently missing the Xumo payout.
+function isTvServiceText(s) {
+  return /\btv\b/i.test(String(s || ""));
+}
+
+function isXumoText(s) {
+  return /xumo/i.test(String(s || ""));
+}
+
 function lookupCommissionRate(commissionRates, providerId, planName) {
   if (!providerId || !planName) return null;
   const target = String(planName).trim().toLowerCase();
@@ -702,6 +717,36 @@ export async function renderCustomerUpload(container, ctx) {
       });
     }
 
+    // TV service (TV Choice / TV Stream / TV Select Plus / ...) is normally
+    // bundled with a Xumo box, which pays its own separate commission line
+    // on the provider's report. Staff often don't note "Xumo" explicitly
+    // when entering the order, so auto-add a companion Xumo line whenever a
+    // block has TV service but no Xumo line yet -- it's still editable/
+    // removable below, and gets flagged via needsReview so staff notice it.
+    for (const b of blocks) {
+      const tvLine = b.lines.find((l) => isTvServiceText(l.serviceName));
+      const hasXumo = b.lines.some((l) => isXumoText(l.serviceName));
+      if (tvLine && !hasXumo) {
+        b.lines.push({
+          id: crypto.randomUUID(),
+          excluded: false,
+          serviceName: "Xumo",
+          providerId: tvLine.providerId,
+          providerMatched: tvLine.providerMatched,
+          providerRaw: tvLine.providerRaw,
+          accountNumberRaw: tvLine.accountNumberRaw,
+          accountNumber: tvLine.accountNumber,
+          expectedCommission: autoLookupCommission(commissionRates, tvLine.providerId, ["Xumo"], null),
+          units: null,
+          unitsInstalled: null,
+          mobileLinesOrdered: null,
+          mobileLinesInstalled: null,
+          planName: null,
+          autoAddedXumo: true,
+        });
+      }
+    }
+
     // Surface Provider values that didn't match anything in the master list
     // — these previously saved silently as "?"; now they're flagged so
     // staff can fix the master list or pick manually. (Service no longer
@@ -712,6 +757,9 @@ export async function renderCustomerUpload(container, ctx) {
       ];
       const reasons = [];
       if (unmatchedProviders.length) reasons.push(`Provider not matched: ${unmatchedProviders.join(", ")}`);
+      if (b.lines.some((l) => l.autoAddedXumo)) {
+        reasons.push("Xumo line auto-added for TV service — remove it below if this customer didn't get one");
+      }
       b.reviewReasons = reasons;
       b.needsReview = reasons.length > 0;
     }
