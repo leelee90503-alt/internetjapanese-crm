@@ -7,6 +7,7 @@ import { renderOrders } from "./screen-orders.js";
 import { renderFollowups } from "./screen-followups.js";
 import { renderStaff } from "./screen-staff.js";
 import { renderCommissionReports } from "./screen-commissionReports.js";
+import { renderMissingCommission } from "./screen-missingCommission.js";
 import { escapeHtml } from "./normalize.js";
 
 // Sidebar navigation tree. A "link" item is a standalone top-level menu
@@ -23,6 +24,7 @@ const NAV = [
     children: [
       { path: "#/upload", label: "Customer Excel Upload", render: renderCustomerUpload, adminOnly: false },
       { path: "#/commission-reports", label: "Commission Report", render: renderCommissionReports, adminOnly: true },
+      { path: "#/missing-commission", label: "Missing Commission", render: renderMissingCommission, adminOnly: true },
     ],
   },
   {
