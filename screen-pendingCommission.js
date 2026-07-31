@@ -163,6 +163,14 @@ export async function renderPendingCommission(container, ctx) {
   }
 
   function draw() {
+    // Preserve focus/cursor position across the innerHTML replacement below --
+    // otherwise every keystroke in a text input re-renders the DOM and drops
+    // focus, so only the first character of anything typed quickly ever lands.
+    const active = document.activeElement;
+    const activeId = active && container.contains(active) ? active.id : null;
+    const activeSelStart = activeId && "selectionStart" in active ? active.selectionStart : null;
+    const activeSelEnd = activeId && "selectionEnd" in active ? active.selectionEnd : null;
+
     const rows = filteredSorted();
     const totalPages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
     if (page >= totalPages) page = totalPages - 1;
@@ -229,6 +237,20 @@ export async function renderPendingCommission(container, ctx) {
     `;
 
     wireEvents();
+
+    if (activeId) {
+      const toRefocus = container.querySelector(`#${activeId}`);
+      if (toRefocus) {
+        toRefocus.focus();
+        if (activeSelStart !== null && "setSelectionRange" in toRefocus) {
+          try {
+            toRefocus.setSelectionRange(activeSelStart, activeSelEnd);
+          } catch {
+            // some input types (e.g. number) don't support setSelectionRange -- ignore
+          }
+        }
+      }
+    }
   }
 
   function wireEvents() {
