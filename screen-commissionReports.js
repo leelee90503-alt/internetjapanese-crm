@@ -17,7 +17,7 @@ const FIELD_DEFS = [
   {
     key: "commission_product_name",
     label: "Commission Product Name (optional — disambiguates multi-line accounts, e.g. multiple mobile lines)",
-    guesses: ["commission product", "product name", "product", "package", "plan name", "plan", "상품"],
+    guesses: ["commission product name", "commission product", "product name", "package", "plan name", "상품"],
   },
   {
     key: "commission_amount",
@@ -210,9 +210,15 @@ export async function renderCommissionReports(container, ctx) {
     dataRows = rows.slice(1).filter((r) => r.some((c) => String(c ?? "").trim() !== ""));
     mapping = {};
     FIELD_DEFS.forEach((f) => {
-      const idx = headers.findIndex((h) =>
-        f.guesses.some((g) => h.toLowerCase().includes(g.toLowerCase()))
-      );
+      // Exact match first (e.g. a header literally "Commission" or "Account"),
+      // then fall back to substring -- exact-first avoids a more specific
+      // header (e.g. "Commission Product Name") losing out to an earlier,
+      // more generic header that happens to also contain the guess text
+      // (e.g. "Commission" the guess matching "Commission Type" first).
+      let idx = headers.findIndex((h) => f.guesses.some((g) => h.toLowerCase() === g.toLowerCase()));
+      if (idx === -1) {
+        idx = headers.findIndex((h) => f.guesses.some((g) => h.toLowerCase().includes(g.toLowerCase())));
+      }
       mapping[f.key] = idx;
     });
   }
