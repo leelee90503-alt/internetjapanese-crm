@@ -21,20 +21,36 @@ function daysSince(dateStr) {
   return Math.floor((today - start) / 86400000);
 }
 
-function downloadAsExcel(rows) {
-  const out = rows.map((l) => ({
-    Customer: l.orders?.customers?.name || "",
-    "Account #": l.account_number || "",
-    Provider: l.providers?.name || "",
-    Plan: l.plan_name || "",
-    "Order Date": l.orders?.order_date || "",
-    "Order #": l.orders?.order_number || "",
-    "Expected Commission": l.expected_commission === null || l.expected_commission === undefined ? "" : Number(l.expected_commission),
-    "Confirmed Missing On": l.resolution_at ? new Date(l.resolution_at).toLocaleDateString() : "",
-    Note: l.resolution_note || "",
-  }));
+function downloadAsExcel(rows, legacyRows) {
+  const out = [
+    ...rows.map((l) => ({
+      Source: "Confirmed",
+      Customer: l.orders?.customers?.name || "",
+      "Account #": l.account_number || "",
+      Provider: l.providers?.name || "",
+      Plan: l.plan_name || "",
+      "Order Date": l.orders?.order_date || "",
+      "Order #": l.orders?.order_number || "",
+      "Expected Commission": l.expected_commission === null || l.expected_commission === undefined ? "" : Number(l.expected_commission),
+      "Confirmed Missing On": l.resolution_at ? new Date(l.resolution_at).toLocaleDateString() : "",
+      Note: l.resolution_note || "",
+    })),
+    ...(legacyRows || []).map((item) => ({
+      Source: "Older tracked",
+      Customer: item.customer_name || "",
+      "Account #": item.account_number || "",
+      Provider: "",
+      Plan: item.description || "",
+      "Order Date": item.sales_date || "",
+      "Order #": item.source_order_number || "",
+      "Expected Commission": item.price === null || item.price === undefined ? "" : Number(item.price),
+      "Confirmed Missing On": "",
+      Note: item.review_note || item.status_notes || "",
+    })),
+  ];
   const sheet = XLSX.utils.json_to_sheet(out);
   sheet["!cols"] = [
+    { wch: 14 }, // Source
     { wch: 20 }, // Customer
     { wch: 18 }, // Account #
     { wch: 12 }, // Provider
@@ -99,6 +115,17 @@ export async function renderMissingCommission(container, ctx) {
     });
   }
 
+  function filteredLegacyItems() {
+    if (!searchTerm.trim()) return legacyItems;
+    const needle = searchTerm.trim().toLowerCase();
+    return legacyItems.filter((item) => {
+      const name = (item.customer_name || "").toLowerCase();
+      const acct = (item.account_number || "").toString().toLowerCase();
+      const desc = (item.description || "").toLowerCase();
+      return name.includes(needle) || acct.includes(needle) || desc.includes(needle);
+    });
+  }
+
   function rowHtml(l) {
     const days = daysSince(l.orders?.order_date);
     return `
@@ -146,7 +173,12 @@ export async function renderMissingCommission(container, ctx) {
     const activeSelEnd = activeId && "selectionEnd" in active ? active.selectionEnd : null;
 
     const rows = filteredLines();
-    const totalExpected = rows.reduce((s, l) => s + (Number(l.expected_commission) || 0), 0);
+    const legacyRows = filteredLegacyItems();
+    const totalExpected =
+      rows.reduce((s, l) => s + (Number(l.expected_commission) || 0), 0) +
+      legacyRows.reduce((s, item) => s + (Number(item.price) || 0), 0);
+    const combinedTotal = rows.length + legacyRows.length;
+    const combinedUnfiltered = lines.length + legacyItems.length;
 
     container.innerHTML = `
       <div class="screen">
@@ -160,7 +192,8 @@ export async function renderMissingCommission(container, ctx) {
         ${loadError ? `<div class="alert error">Failed to load: ${escapeHtml(loadError)}</div>` : ""}
 
         <div class="inline-form">
-          <span class="badge error">Total: ${rows.length} confirmed missing${searchTerm.trim() ? ` (filtered from ${lines.length})` : ""}</span>
+          <span class="badge error">Total: ${combinedTotal} missing${searchTerm.trim() ? ` (filtered from ${combinedUnfiltered})` : ""}</span>
+          <span class="badge neutral">${rows.length} confirmed + ${legacyRows.length} older tracked</span>
           <span class="badge neutral">Total expected: ${fmtMoney(totalExpected)}</span>
           <button class="btn small" id="mc-download-btn">Download Excel</button>
         </div>
@@ -184,7 +217,7 @@ export async function renderMissingCommission(container, ctx) {
         ${
           legacyItems.length > 0
             ? `
-          <h3>Older manually-tracked items</h3>
+          <h3>Older manually-tracked items (${legacyRows.length}${searchTerm.trim() ? ` of ${legacyItems.length}` : ""})</h3>
           <p class="muted">
             From before this screen was split from Pending Commission -- not yet resolved. New items won't appear here going forward.
           </p>
@@ -196,7 +229,7 @@ export async function renderMissingCommission(container, ctx) {
               </tr>
             </thead>
             <tbody>
-              ${legacyItems.map(legacyRowHtml).join("")}
+              ${legacyRows.map(legacyRowHtml).join("") || `<tr><td colspan="8" class="muted">No matches for this search.</td></tr>`}
             </tbody>
           </table>`
             : ""
@@ -229,11 +262,12 @@ export async function renderMissingCommission(container, ctx) {
 
     container.querySelector("#mc-download-btn")?.addEventListener("click", () => {
       const rows = filteredLines();
-      if (rows.length === 0) {
+      const legacyRows = filteredLegacyItems();
+      if (rows.length === 0 && legacyRows.length === 0) {
         alert("Nothing to download.");
         return;
       }
-      downloadAsExcel(rows);
+      downloadAsExcel(rows, legacyRows);
     });
 
     container.querySelectorAll("[data-back-to-pending]").forEach((btn) => {
