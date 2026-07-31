@@ -56,35 +56,42 @@ function pickCandidate(candidates, productNameRaw) {
   if (candidates.length === 1) return candidates[0];
 
   const product = normPlan(productNameRaw);
-  if (product) {
-    // 1) exact plan_name match
-    let hit = candidates.find((l) => normPlan(l.plan_name) === product);
-    if (hit) return hit;
-
-    // 2) substring match either direction (skip bare "mobile" plan_names --
-    //    those are ambiguous between multiple lines and handled by ordinal
-    //    matching below instead)
-    hit = candidates.find((l) => {
-      const p = normPlan(l.plan_name);
-      if (!p || p === "mobile") return false;
-      return p.includes(product) || product.includes(p);
-    });
-    if (hit) return hit;
-
-    // 3) mobile line ordinal match: "Mobile Line 2" / "Mobile Line 2:Unlimited"
-    //    etc. map to the Nth mobile-plan candidate for this account, in
-    //    original (created_at) order -- matches how the app numbers mobile
-    //    lines during customer upload.
-    if (isMobileProductText(product)) {
-      const mobileCandidates = candidates.filter((l) => isMobileProductText(l.plan_name));
-      const n = mobileLineOrdinal(product);
-      if (mobileCandidates[n - 1]) return mobileCandidates[n - 1];
-    }
+  if (!product) {
+    // No product name given (or that column wasn't mapped) -- multiple
+    // candidates can't be told apart, so fall back to the pre-Part-B
+    // best-effort behavior (same as when this account had only one line).
+    return candidates.find((l) => l.status === "pending") || candidates[0];
   }
 
-  // Fallback (no product name column mapped, or nothing matched above):
-  // same behavior as before this feature existed.
-  return candidates.find((l) => l.status === "pending") || candidates[0];
+  // 1) exact plan_name match
+  let hit = candidates.find((l) => normPlan(l.plan_name) === product);
+  if (hit) return hit;
+
+  // 2) substring match either direction (skip bare "mobile" plan_names --
+  //    those are ambiguous between multiple lines and handled by ordinal
+  //    matching below instead)
+  hit = candidates.find((l) => {
+    const p = normPlan(l.plan_name);
+    if (!p || p === "mobile") return false;
+    return p.includes(product) || product.includes(p);
+  });
+  if (hit) return hit;
+
+  // 3) mobile line ordinal match: "Mobile Line 2" / "Mobile Line 2:Unlimited"
+  //    etc. map to the Nth mobile-plan candidate for this account, in
+  //    original (created_at) order -- matches how the app numbers mobile
+  //    lines during customer upload.
+  if (isMobileProductText(product)) {
+    const mobileCandidates = candidates.filter((l) => isMobileProductText(l.plan_name));
+    const n = mobileLineOrdinal(product);
+    if (mobileCandidates[n - 1]) return mobileCandidates[n - 1];
+  }
+
+  // Multiple candidates exist and a product name WAS given, but it didn't
+  // match any of them (e.g. "Xumo" when no such line was ever created) --
+  // don't guess and silently write commission data onto the wrong line;
+  // leave this row unmatched so the admin resolves it by hand.
+  return null;
 }
 
 export async function renderCommissionReports(container, ctx) {
