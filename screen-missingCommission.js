@@ -34,6 +34,13 @@ function statusLabel(item) {
   return "Missing";
 }
 
+function resolutionLabel(item) {
+  if (item.resolution_choice === "received") return "Received";
+  if (item.resolution_choice === "keep_pending") return "Keep Pending";
+  if (item.resolution_choice === "confirmed_missing") return "Confirmed Missing";
+  return "";
+}
+
 function downloadAsExcel(items) {
   const rows = items.map((item) => ({
     Status: statusLabel(item),
@@ -41,6 +48,9 @@ function downloadAsExcel(items) {
     "Account #": item.account_number || "",
     Missing: item.description || "",
     Price: item.price === null || item.price === undefined ? "" : Number(item.price),
+    "Report Item": item.report_description || "",
+    "Report Amount": item.report_amount === null || item.report_amount === undefined ? "" : Number(item.report_amount),
+    Decision: resolutionLabel(item),
     "Order #": item.source_order_number || "",
     "Sales Date": item.sales_date || "",
     "Claimed To Provider": item.claimed_date_raw || "",
@@ -56,6 +66,9 @@ function downloadAsExcel(items) {
     { wch: 18 }, // Account #
     { wch: 24 }, // Missing
     { wch: 10 }, // Price
+    { wch: 24 }, // Report Item
+    { wch: 14 }, // Report Amount
+    { wch: 16 }, // Decision
     { wch: 16 }, // Order #
     { wch: 12 }, // Sales Date
     { wch: 18 }, // Claimed To Provider
@@ -185,11 +198,18 @@ export async function renderMissingCommission(container, ctx) {
     return `<span class="badge error">Missing</span>`;
   }
 
+  function resolutionBadge(item) {
+    if (item.resolution_choice === "received") return `<span class="badge ok">Marked: Received</span>`;
+    if (item.resolution_choice === "keep_pending") return `<span class="badge neutral">Marked: Keep Pending</span>`;
+    if (item.resolution_choice === "confirmed_missing") return `<span class="badge error">Marked: Confirmed Missing</span>`;
+    return "";
+  }
+
   function rowHtml(item) {
     const lineCount = (item.matched_line_ids || []).length;
     return `
       <tr data-id="${item.id}" class="${item.needs_review && !item.resolved ? "needs-review-row" : ""}">
-        <td>${badgeForItem(item)}${item.auto_detected ? ` <span class="badge neutral">Auto</span>` : ""}</td>
+        <td>${badgeForItem(item)}${item.auto_detected ? ` <span class="badge neutral">Auto</span>` : ""}${resolutionBadge(item) ? `<br/>${resolutionBadge(item)}` : ""}</td>
         <td><button type="button" class="btn-link" data-toggle="${item.id}">${escapeHtml(item.customer_name || "-")}</button></td>
         <td>${escapeHtml(item.account_number || "-")}</td>
         <td>${escapeHtml(item.description || "-")}</td>
@@ -229,6 +249,68 @@ export async function renderMissingCommission(container, ctx) {
                 ? `<div class="alert info"><strong>Review note:</strong> ${escapeHtml(item.review_note)}</div>`
                 : ""
             }
+
+            <h4>Expected vs. actual report</h4>
+            <p class="muted">
+              Compare what we expected against what the commission report actually shows, then record a decision below.
+              Leave the report fields blank if the account/line doesn't appear in the report at all.
+            </p>
+            <div class="grid3">
+              <div>
+                <span class="muted">Expected item</span>
+                <div>${escapeHtml(item.description || "-")}</div>
+              </div>
+              <div>
+                <span class="muted">Expected amount</span>
+                <div>${fmtMoney(item.price)}</div>
+              </div>
+              <div></div>
+            </div>
+            <div class="inline-form">
+              <input type="text" placeholder="What the report actually shows (item/plan name)" style="flex:1"
+                id="mc-report-desc-${item.id}" value="${escapeHtml(item.report_description || "")}" />
+              <input type="number" step="0.01" placeholder="Report amount ($)"
+                id="mc-report-amount-${item.id}" value="${escapeHtml(item.report_amount === null || item.report_amount === undefined ? "" : item.report_amount)}" style="width:160px" />
+              <button class="btn small" data-save-report="${item.id}" ${busy ? "disabled" : ""}>Save comparison</button>
+            </div>
+            ${
+              item.report_description || (item.report_amount !== null && item.report_amount !== undefined)
+                ? `<table class="data-table small">
+                    <thead><tr><th></th><th>Item</th><th>Amount</th></tr></thead>
+                    <tbody>
+                      <tr><td class="muted">Expected</td><td>${escapeHtml(item.description || "-")}</td><td>${fmtMoney(item.price)}</td></tr>
+                      <tr><td class="muted">Report</td><td>${escapeHtml(item.report_description || "-")}</td><td>${fmtMoney(item.report_amount)}</td></tr>
+                    </tbody>
+                  </table>`
+                : ""
+            }
+
+            <h4>Decision</h4>
+            ${
+              item.resolution_choice
+                ? `<div class="alert ${item.resolution_choice === "confirmed_missing" ? "error" : "info"}">
+                    <strong>Current decision:</strong> ${
+                      item.resolution_choice === "received"
+                        ? "Received"
+                        : item.resolution_choice === "keep_pending"
+                        ? "Keep Pending"
+                        : "Confirmed Missing"
+                    }${item.resolution_note ? ` -- ${escapeHtml(item.resolution_note)}` : ""}
+                    ${item.resolution_at ? ` (${escapeHtml(new Date(item.resolution_at).toLocaleDateString())})` : ""}
+                  </div>`
+                : ""
+            }
+            <div class="btn-row">
+              <button class="btn small primary" data-decide="${item.id}:received" ${busy || item.resolved ? "disabled" : ""}>
+                Mark Received (same item, pay it)
+              </button>
+              <button class="btn small" data-decide="${item.id}:keep_pending" ${busy || item.resolved ? "disabled" : ""}>
+                Keep Pending (wait for next report)
+              </button>
+              <button class="btn small danger" data-decide="${item.id}:confirmed_missing" ${busy || item.resolved ? "disabled" : ""}>
+                Confirmed Missing (follow up with provider)
+              </button>
+            </div>
 
             <h4>Linked order lines</h4>
             ${
@@ -332,8 +414,9 @@ export async function renderMissingCommission(container, ctx) {
           Commission we believe has NOT been received yet, tracked separately from the automatic Commission Report matching.
           Orders normally sit "pending" for 2-3 weeks while waiting on the provider's commission report -- any order still
           pending more than ${STALE_DAYS} days after its sale date is automatically added here as an "Auto" item.
-          Link an item to the actual order line(s) it corresponds to, and mark it "Received" once the commission comes in
-          (this also updates the linked order line's status).
+          Open an item's Details to compare the expected item/amount against what the report actually shows, then choose
+          Mark Received (same item, pay it), Keep Pending (still waiting on a future report), or Confirmed Missing
+          (genuinely missing, needs provider follow-up).
         </p>
 
         ${loadError ? `<div class="alert error">Failed to load: ${escapeHtml(loadError)}</div>` : ""}
@@ -520,6 +603,143 @@ export async function renderMissingCommission(container, ctx) {
         const refreshed = items.find((i) => i.id === itemId);
         if (refreshed) searchResults[`linked:${itemId}`] = await fetchLineDetails(refreshed.matched_line_ids);
         draw();
+      });
+    });
+
+    container.querySelectorAll("[data-save-report]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.saveReport;
+        const descEl = container.querySelector(`#mc-report-desc-${id}`);
+        const amountEl = container.querySelector(`#mc-report-amount-${id}`);
+        const reportDescription = (descEl?.value || "").trim();
+        const rawAmount = (amountEl?.value || "").trim();
+        busy = true;
+        draw();
+        const { error } = await supabase
+          .from("missing_commission_items")
+          .update({
+            report_description: reportDescription || null,
+            report_amount: rawAmount === "" ? null : Number(rawAmount),
+          })
+          .eq("id", id);
+        busy = false;
+        if (error) {
+          alert("Failed to save comparison: " + error.message);
+        }
+        await load();
+        expandedId = id;
+        draw();
+      });
+    });
+
+    container.querySelectorAll("[data-decide]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const [id, choice] = btn.dataset.decide.split(":");
+        const item = items.find((i) => i.id === id);
+        if (!item) return;
+
+        if (choice === "received") {
+          const lineIds = item.matched_line_ids || [];
+          if (
+            !confirm(
+              `Mark "${item.customer_name}" - ${item.description} as received?${
+                lineIds.length ? ` This will also set ${lineIds.length} linked order line(s) to "received".` : ""
+              }`
+            )
+          ) {
+            return;
+          }
+          busy = true;
+          draw();
+          if (lineIds.length > 0) {
+            const { data: lines } = await supabase.from("order_service_lines").select("id, expected_commission").in("id", lineIds);
+            for (const l of lines || []) {
+              await supabase
+                .from("order_service_lines")
+                .update({
+                  status: "received",
+                  actual_commission_amount: l.expected_commission,
+                  commission_matched_at: new Date().toISOString(),
+                  commission_matched_by: ctx.profile?.id || null,
+                })
+                .eq("id", l.id);
+            }
+          }
+          const { error } = await supabase
+            .from("missing_commission_items")
+            .update({
+              resolved: true,
+              resolution_choice: "received",
+              resolution_at: new Date().toISOString(),
+              resolution_by: ctx.profile?.id || null,
+            })
+            .eq("id", id);
+          busy = false;
+          if (error) alert("Failed to mark received: " + error.message);
+          await load();
+          expandedId = id;
+          draw();
+          return;
+        }
+
+        if (choice === "keep_pending") {
+          const lineIds = item.matched_line_ids || [];
+          busy = true;
+          draw();
+          // Keeping pending means: the linked order line(s) stay/return to
+          // "pending" (in case a prior bulk pass had marked them received
+          // on an unverified assumption), and the missing-commission item
+          // itself is left open (not resolved) so it keeps showing up here
+          // and in Pending Commission until the next report confirms it.
+          if (lineIds.length > 0) {
+            await supabase
+              .from("order_service_lines")
+              .update({ status: "pending", actual_commission_amount: null, commission_matched_at: null, commission_matched_by: null })
+              .in("id", lineIds);
+          }
+          const { error } = await supabase
+            .from("missing_commission_items")
+            .update({
+              resolved: false,
+              resolution_choice: "keep_pending",
+              resolution_at: new Date().toISOString(),
+              resolution_by: ctx.profile?.id || null,
+            })
+            .eq("id", id);
+          busy = false;
+          if (error) alert("Failed to update: " + error.message);
+          await load();
+          expandedId = id;
+          draw();
+          return;
+        }
+
+        if (choice === "confirmed_missing") {
+          if (
+            !confirm(
+              `Confirm "${item.customer_name}" - ${item.description} as genuinely missing? This keeps it open on the Missing Commission list for provider follow-up (not resolved).`
+            )
+          ) {
+            return;
+          }
+          busy = true;
+          draw();
+          const { error } = await supabase
+            .from("missing_commission_items")
+            .update({
+              resolved: false,
+              needs_review: false,
+              resolution_choice: "confirmed_missing",
+              resolution_at: new Date().toISOString(),
+              resolution_by: ctx.profile?.id || null,
+            })
+            .eq("id", id);
+          busy = false;
+          if (error) alert("Failed to update: " + error.message);
+          await load();
+          expandedId = id;
+          draw();
+        }
       });
     });
 
