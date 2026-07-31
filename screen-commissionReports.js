@@ -15,6 +15,11 @@ const FIELD_DEFS = [
   { key: "account_number", label: "Account Number", guesses: ["account", "acc", "계정번호", "계정"] },
   { key: "customer_name", label: "Customer Name (reference only)", guesses: ["name", "customer", "고객"] },
   {
+    key: "commission_product_name",
+    label: "Commission Product Name (optional — disambiguates multi-line accounts, e.g. multiple mobile lines)",
+    guesses: ["commission product", "product name", "product", "package", "plan name", "plan", "상품"],
+  },
+  {
     key: "commission_amount",
     label: "Commission Amount",
     guesses: ["commission", "payout", "payment", "amount", "커미션", "금액"],
@@ -22,6 +27,65 @@ const FIELD_DEFS = [
 ];
 
 const AMOUNT_EPSILON = 0.01;
+
+// ---- multi-line-per-account matching helpers ----
+// Some providers (e.g. Spectrum) send one commission report row per line
+// within an account (Mobile Line 1, Mobile Line 1:Unlimited, Mobile Line 2,
+// Mobile Line 2:Unlimited, ...) all sharing a single account number. Plain
+// account-number matching can't tell those rows apart, so when the report
+// includes a Commission Product Name column we also compare it against each
+// candidate order_service_line's plan_name.
+function normPlan(s) {
+  return String(s ?? "").trim().toLowerCase();
+}
+
+function isMobileProductText(s) {
+  return /mobile|\bline\s*\d*/.test(normPlan(s));
+}
+
+function mobileLineOrdinal(s) {
+  const m = normPlan(s).match(/line\s*(\d+)/);
+  return m ? Number(m[1]) : 1;
+}
+
+// Pick the best unused candidate order_service_line for one report row.
+// `candidates` must already be filtered to lines not yet claimed by an
+// earlier row in this same upload.
+function pickCandidate(candidates, productNameRaw) {
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  const product = normPlan(productNameRaw);
+  if (product) {
+    // 1) exact plan_name match
+    let hit = candidates.find((l) => normPlan(l.plan_name) === product);
+    if (hit) return hit;
+
+    // 2) substring match either direction (skip bare "mobile" plan_names --
+    //    those are ambiguous between multiple lines and handled by ordinal
+    //    matching below instead)
+    hit = candidates.find((l) => {
+      const p = normPlan(l.plan_name);
+      if (!p || p === "mobile") return false;
+      return p.includes(product) || product.includes(p);
+    });
+    if (hit) return hit;
+
+    // 3) mobile line ordinal match: "Mobile Line 2" / "Mobile Line 2:Unlimited"
+    //    etc. map to the Nth mobile-plan candidate for this account, in
+    //    original (created_at) order -- matches how the app numbers mobile
+    //    lines during customer upload.
+    if (isMobileProductText(product)) {
+      const mobileCandidates = candidates.filter((l) => isMobileProductText(l.plan_name));
+      const n = mobileLineOrdinal(product);
+      if (mobileCandidates[n - 1]) return mobileCandidates[n - 1];
+    }
+  }
+
+  // Fallback (no product name column mapped, or nothing matched above):
+  // same behavior as before this feature existed.
+  return candidates.find((l) => l.status === "pending") || candidates[0];
+}
 
 export async function renderCommissionReports(container, ctx) {
   let step = "upload"; // upload -> mapping -> review
@@ -227,9 +291,10 @@ export async function renderCommissionReports(container, ctx) {
     const { data: lines, error } = await supabase
       .from("order_service_lines")
       .select(
-        "id, account_number, expected_commission, status, orders(order_date, customers(name, phone))"
+        "id, account_number, plan_name, expected_commission, status, created_at, orders(order_date, customers(name, phone))"
       )
-      .eq("provider_id", selectedProviderId);
+      .eq("provider_id", selectedProviderId)
+      .order("created_at", { ascending: true });
     if (error) {
       alert("Failed to load existing orders for matching: " + error.message);
       linesForProvider = [];
@@ -243,25 +308,44 @@ export async function renderCommissionReports(container, ctx) {
       (linesByAccount[l.account_number] ||= []).push(l);
     });
 
-    reportRows = [];
+    // Parse every data row first, then resolve matches in file order so that,
+    // within one account, earlier rows claim their line before later rows
+    // (needed for the mobile-line-ordinal fallback in pickCandidate).
+    const parsedRows = [];
     for (const row of dataRows) {
       const accountRaw = String(cell(row, "account_number") ?? "").trim();
       const account = normalizeAccountNumber(accountRaw);
       const customerNameRaw = String(cell(row, "customer_name") ?? "").trim();
+      const commissionProductNameRaw = String(cell(row, "commission_product_name") ?? "").trim();
       const commRaw = cell(row, "commission_amount");
       const commissionAmount = commRaw === "" ? null : Number(commRaw);
       if (!account && !customerNameRaw && (commissionAmount === null || isNaN(commissionAmount))) continue;
+      parsedRows.push({
+        accountRaw,
+        account,
+        customerNameRaw,
+        commissionProductNameRaw,
+        commissionAmount: isNaN(commissionAmount) ? null : commissionAmount,
+      });
+    }
 
-      const candidates = account ? linesByAccount[account] || [] : [];
-      const candidate = candidates.find((l) => l.status === "pending") || candidates[0] || null;
+    reportRows = [];
+    const usedLineIds = new Set();
+    for (const pr of parsedRows) {
+      const candidates = (pr.account ? linesByAccount[pr.account] || [] : []).filter(
+        (l) => !usedLineIds.has(l.id)
+      );
+      const candidate = pickCandidate(candidates, pr.commissionProductNameRaw);
+      if (candidate) usedLineIds.add(candidate.id);
 
       reportRows.push({
         id: crypto.randomUUID(),
         excluded: false,
-        accountNumberRaw: accountRaw,
-        accountNumber: account,
-        customerNameRaw,
-        commissionAmount: isNaN(commissionAmount) ? null : commissionAmount,
+        accountNumberRaw: pr.accountRaw,
+        accountNumber: pr.account,
+        customerNameRaw: pr.customerNameRaw,
+        commissionProductNameRaw: pr.commissionProductNameRaw,
+        commissionAmount: pr.commissionAmount,
         matchedLineId: candidate ? candidate.id : null,
         matchStatus: candidate ? "matched" : "unmatched",
       });
@@ -270,7 +354,8 @@ export async function renderCommissionReports(container, ctx) {
 
   function lineLabel(line) {
     const cust = line.orders?.customers;
-    return `${cust?.name || "(no name)"} - ${fmtMoney(line.expected_commission)} (acct: ${line.account_number || "-"})`;
+    const plan = line.plan_name ? ` [${line.plan_name}]` : "";
+    return `${cust?.name || "(no name)"}${plan} - ${fmtMoney(line.expected_commission)} (acct: ${line.account_number || "-"})`;
   }
 
   function drawReviewStep() {
@@ -287,7 +372,7 @@ export async function renderCommissionReports(container, ctx) {
         <table class="data-table small">
           <thead>
             <tr>
-              <th>Include</th><th>Account #</th><th>Customer (from file)</th><th>Commission Amount</th><th>Match</th>
+              <th>Include</th><th>Account #</th><th>Customer (from file)</th><th>Product (from file)</th><th>Commission Amount</th><th>Match</th>
             </tr>
           </thead>
           <tbody>
@@ -304,6 +389,7 @@ export async function renderCommissionReports(container, ctx) {
                   <td><input type="checkbox" class="r-include" ${r.excluded ? "" : "checked"} /></td>
                   <td><input type="text" class="r-account" value="${escapeHtml(r.accountNumberRaw)}" /></td>
                   <td>${escapeHtml(r.customerNameRaw) || "-"}</td>
+                  <td>${escapeHtml(r.commissionProductNameRaw) || "-"}</td>
                   <td><input type="number" step="0.01" class="r-amount" value="${r.commissionAmount ?? ""}" /></td>
                   <td>
                     ${
@@ -325,7 +411,7 @@ export async function renderCommissionReports(container, ctx) {
                   </td>
                 </tr>`;
               })
-              .join("") || `<tr><td colspan="5" class="muted">No rows were loaded from the file.</td></tr>`}
+              .join("") || `<tr><td colspan="6" class="muted">No rows were loaded from the file.</td></tr>`}
           </tbody>
         </table>
       </div>
@@ -421,6 +507,7 @@ export async function renderCommissionReports(container, ctx) {
           raw_data: {
             account_number: r.accountNumberRaw,
             customer_name: r.customerNameRaw,
+            commission_product_name: r.commissionProductNameRaw,
             commission_amount: r.commissionAmount,
           },
           account_number: r.accountNumber,
