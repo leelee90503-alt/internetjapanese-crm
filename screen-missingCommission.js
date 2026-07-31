@@ -1,4 +1,5 @@
 import { supabase } from "./supabaseClient.js";
+import * as XLSX from "xlsx";
 import { escapeHtml, fmtMoney, normalizeAccountNumber } from "./normalize.js";
 
 // Missing Commission: tracks commission the company believes it has NOT
@@ -13,6 +14,46 @@ import { escapeHtml, fmtMoney, normalizeAccountNumber } from "./normalize.js";
 // order; it does not by itself change the order line's status. Marking an
 // item "Received" here is a separate, explicit action that also updates
 // the linked order line(s) to status='received'.
+
+function statusLabel(item) {
+  if (item.resolved) return "Received";
+  if (item.needs_review) return "Needs review";
+  return "Missing";
+}
+
+function downloadAsExcel(items) {
+  const rows = items.map((item) => ({
+    Status: statusLabel(item),
+    Customer: item.customer_name || "",
+    "Account #": item.account_number || "",
+    Missing: item.description || "",
+    Price: item.price === null || item.price === undefined ? "" : Number(item.price),
+    "Order #": item.source_order_number || "",
+    "Sales Date": item.sales_date || "",
+    "Claimed To Provider": item.claimed_date_raw || "",
+    "Status / Notes": item.status_notes || "",
+    "Linked Lines": (item.matched_line_ids || []).length,
+    "Review Note": item.review_note || "",
+  }));
+  const sheet = XLSX.utils.json_to_sheet(rows);
+  sheet["!cols"] = [
+    { wch: 12 }, // Status
+    { wch: 20 }, // Customer
+    { wch: 18 }, // Account #
+    { wch: 24 }, // Missing
+    { wch: 10 }, // Price
+    { wch: 16 }, // Order #
+    { wch: 12 }, // Sales Date
+    { wch: 18 }, // Claimed To Provider
+    { wch: 30 }, // Status / Notes
+    { wch: 12 }, // Linked Lines
+    { wch: 40 }, // Review Note
+  ];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, sheet, "Missing Commission");
+  const dateStr = new Date().toISOString().slice(0, 10);
+  XLSX.writeFile(wb, `Missing_Commission_${dateStr}.xlsx`);
+}
 
 function emptyForm() {
   return {
@@ -227,6 +268,7 @@ export async function renderMissingCommission(container, ctx) {
           <span class="badge ok">${resolvedCount} received</span>
           <label class="checkbox-inline"><input type="checkbox" id="show-resolved" ${showResolved ? "checked" : ""} /> Show received</label>
           <button class="btn small primary" id="mc-add-open-btn">+ Add Missing Item</button>
+          <button class="btn small" id="mc-download-btn">Download Excel</button>
         </div>
 
         ${addFormHtml()}
@@ -252,6 +294,15 @@ export async function renderMissingCommission(container, ctx) {
     container.querySelector("#show-resolved")?.addEventListener("change", (e) => {
       showResolved = e.target.checked;
       draw();
+    });
+
+    container.querySelector("#mc-download-btn")?.addEventListener("click", () => {
+      const visible = items.filter((i) => showResolved || !i.resolved);
+      if (visible.length === 0) {
+        alert("Nothing to download.");
+        return;
+      }
+      downloadAsExcel(visible);
     });
 
     container.querySelector("#mc-add-open-btn")?.addEventListener("click", () => {
