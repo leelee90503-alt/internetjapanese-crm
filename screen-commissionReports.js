@@ -581,6 +581,7 @@ export async function renderCommissionReports(container, ctx) {
                           <option value="received" ${l.status === "received" ? "selected" : ""}>Received</option>
                           <option value="mismatch" ${l.status === "mismatch" ? "selected" : ""}>Mismatch</option>
                           <option value="no_report" ${l.status === "no_report" ? "selected" : ""}>No Report (manual)</option>
+                          <option value="missing" ${l.status === "missing" ? "selected" : ""}>Missing</option>
                         </select>
                       </td>
                       <td><button class="btn small m-save">Save</button></td>
