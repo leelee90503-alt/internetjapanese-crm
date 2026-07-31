@@ -15,6 +15,19 @@ import { escapeHtml, fmtMoney, normalizeAccountNumber } from "./normalize.js";
 // item "Received" here is a separate, explicit action that also updates
 // the linked order line(s) to status='received'.
 
+// How long an order_service_line is allowed to sit in "pending" before we
+// treat it as an actual missing-commission case instead of just "still
+// waiting for the provider's report" (providers typically take 2-3 weeks
+// to pay/report commission). Measured from the order's sale date
+// (orders.order_date), applied to every provider.
+const STALE_DAYS = 21;
+
+function cutoffDateStr() {
+  const d = new Date();
+  d.setDate(d.getDate() - STALE_DAYS);
+  return d.toISOString().slice(0, 10);
+}
+
 function statusLabel(item) {
   if (item.resolved) return "Received";
   if (item.needs_review) return "Needs review";
@@ -33,6 +46,7 @@ function downloadAsExcel(items) {
     "Claimed To Provider": item.claimed_date_raw || "",
     "Status / Notes": item.status_notes || "",
     "Linked Lines": (item.matched_line_ids || []).length,
+    Source: item.auto_detected ? "Auto-detected" : "Manual",
     "Review Note": item.review_note || "",
   }));
   const sheet = XLSX.utils.json_to_sheet(rows);
@@ -47,6 +61,7 @@ function downloadAsExcel(items) {
     { wch: 18 }, // Claimed To Provider
     { wch: 30 }, // Status / Notes
     { wch: 12 }, // Linked Lines
+    { wch: 14 }, // Source
     { wch: 40 }, // Review Note
   ];
   const wb = XLSX.utils.book_new();
@@ -78,6 +93,65 @@ export async function renderMissingCommission(container, ctx) {
   let addFormOpen = false;
   let addForm = emptyForm();
   let busy = false;
+  let autoAddedCount = 0;
+  let scanError = null;
+
+  // Find order_service_lines that are still "pending" more than STALE_DAYS
+  // after the order's sale date, and that aren't already tracked by an
+  // existing missing-commission item (manual or previously auto-added),
+  // and add them as new items automatically. This is what turns "waiting
+  // for the provider's report" into "actually missing" once the normal
+  // 2-3 week turnaround has clearly passed.
+  async function scanForStaleMissing() {
+    const cutoff = cutoffDateStr();
+    const { data: staleLines, error: staleErr } = await supabase
+      .from("order_service_lines")
+      .select("id, account_number, plan_name, expected_commission, orders!inner(order_date, order_number, customers(name))")
+      .eq("status", "pending")
+      .lte("orders.order_date", cutoff);
+    if (staleErr) {
+      scanError = staleErr.message;
+      return 0;
+    }
+    if (!staleLines || staleLines.length === 0) return 0;
+
+    const { data: existingItems, error: existErr } = await supabase.from("missing_commission_items").select("matched_line_ids");
+    if (existErr) {
+      scanError = existErr.message;
+      return 0;
+    }
+    const alreadyTracked = new Set((existingItems || []).flatMap((i) => i.matched_line_ids || []));
+    const newOnes = staleLines.filter((l) => !alreadyTracked.has(l.id));
+    if (newOnes.length === 0) return 0;
+
+    const today = new Date();
+    const payload = newOnes.map((l) => {
+      const orderDate = l.orders?.order_date || null;
+      const daysPending = orderDate ? Math.floor((today - new Date(orderDate + "T00:00:00")) / 86400000) : null;
+      return {
+        customer_name: l.orders?.customers?.name || "(unknown)",
+        account_number: l.account_number || null,
+        description: l.plan_name || "(no plan name)",
+        source_order_number: l.orders?.order_number || null,
+        sales_date: orderDate,
+        price: l.expected_commission,
+        claimed_date_raw: null,
+        status_notes: `Auto-detected: order placed ${daysPending !== null ? daysPending + " days ago" : `over ${STALE_DAYS} days ago`}, still pending with no commission match.`,
+        matched_line_ids: [l.id],
+        needs_review: false,
+        review_note: null,
+        auto_detected: true,
+        created_by: ctx.profile?.id || null,
+      };
+    });
+
+    const { error: insertErr } = await supabase.from("missing_commission_items").insert(payload);
+    if (insertErr) {
+      scanError = insertErr.message;
+      return 0;
+    }
+    return payload.length;
+  }
 
   async function load() {
     const { data, error } = await supabase
@@ -115,7 +189,7 @@ export async function renderMissingCommission(container, ctx) {
     const lineCount = (item.matched_line_ids || []).length;
     return `
       <tr data-id="${item.id}" class="${item.needs_review && !item.resolved ? "needs-review-row" : ""}">
-        <td>${badgeForItem(item)}</td>
+        <td>${badgeForItem(item)}${item.auto_detected ? ` <span class="badge neutral">Auto</span>` : ""}</td>
         <td><button type="button" class="btn-link" data-toggle="${item.id}">${escapeHtml(item.customer_name || "-")}</button></td>
         <td>${escapeHtml(item.account_number || "-")}</td>
         <td>${escapeHtml(item.description || "-")}</td>
@@ -256,11 +330,15 @@ export async function renderMissingCommission(container, ctx) {
         <h2>Missing Commission</h2>
         <p class="muted">
           Commission we believe has NOT been received yet, tracked separately from the automatic Commission Report matching.
+          Orders normally sit "pending" for 2-3 weeks while waiting on the provider's commission report -- any order still
+          pending more than ${STALE_DAYS} days after its sale date is automatically added here as an "Auto" item.
           Link an item to the actual order line(s) it corresponds to, and mark it "Received" once the commission comes in
           (this also updates the linked order line's status).
         </p>
 
         ${loadError ? `<div class="alert error">Failed to load: ${escapeHtml(loadError)}</div>` : ""}
+        ${scanError ? `<div class="alert error">Auto-scan failed: ${escapeHtml(scanError)}</div>` : ""}
+        ${autoAddedCount > 0 ? `<div class="alert info">${autoAddedCount} item(s) automatically added just now -- pending more than ${STALE_DAYS} days past the order date with no commission match yet.</div>` : ""}
 
         <div class="inline-form">
           <span class="badge error">${missingCount} outstanding</span>
@@ -509,6 +587,7 @@ export async function renderMissingCommission(container, ctx) {
     });
   }
 
+  autoAddedCount = await scanForStaleMissing();
   await load();
   draw();
 }
