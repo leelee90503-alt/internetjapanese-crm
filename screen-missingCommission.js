@@ -72,6 +72,7 @@ export async function renderMissingCommission(container, ctx) {
   let loadError = null;
   let busy = false;
   let searchTerm = "";
+  let searchDraft = ""; // text typed into the search box, not applied until "Search" is clicked
 
   // Legacy items from the old missing_commission_items workflow (manual
   // 24-item upload etc.) that are still open. Shown in a separate section
@@ -208,7 +209,9 @@ export async function renderMissingCommission(container, ctx) {
         </div>
 
         <div class="inline-form">
-          <input type="text" placeholder="Search customer / account / plan / provider" id="mc-search" value="${escapeHtml(searchTerm)}" style="flex:1" />
+          <input type="text" placeholder="Search customer / account / plan / provider" id="mc-search" value="${escapeHtml(searchDraft)}" style="flex:1" />
+          <button class="btn" id="mc-search-btn">Search</button>
+          ${searchTerm.trim() ? `<button class="btn" id="mc-search-clear-btn">Clear</button>` : ""}
         </div>
 
         <table class="data-table">
@@ -265,7 +268,21 @@ export async function renderMissingCommission(container, ctx) {
 
   function wireEvents() {
     container.querySelector("#mc-search")?.addEventListener("input", (e) => {
-      searchTerm = e.target.value;
+      searchDraft = e.target.value;
+    });
+    container.querySelector("#mc-search")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        searchTerm = searchDraft;
+        draw();
+      }
+    });
+    container.querySelector("#mc-search-btn")?.addEventListener("click", () => {
+      searchTerm = searchDraft;
+      draw();
+    });
+    container.querySelector("#mc-search-clear-btn")?.addEventListener("click", () => {
+      searchTerm = "";
+      searchDraft = "";
       draw();
     });
 

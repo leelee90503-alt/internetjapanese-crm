@@ -74,6 +74,7 @@ export async function renderPendingCommission(container, ctx) {
   // filters
   let filterProvider = "";
   let filterSearch = "";
+  let filterSearchDraft = ""; // text typed into the search box, not applied until "Search" is clicked
   let filterMinDays = "";
   let sortBy = "order_date_asc"; // oldest first by default -- oldest pending is usually most urgent
 
@@ -344,7 +345,9 @@ export async function renderPendingCommission(container, ctx) {
         </div>
 
         <div class="inline-form">
-          <input type="text" placeholder="Search customer / account / plan" id="pc-search" value="${escapeHtml(filterSearch)}" style="flex:1" />
+          <input type="text" placeholder="Search customer / account / plan" id="pc-search" value="${escapeHtml(filterSearchDraft)}" style="flex:1" />
+          <button class="btn" id="pc-search-btn">Search</button>
+          ${filterSearch.trim() ? `<button class="btn" id="pc-search-clear-btn">Clear</button>` : ""}
           <select id="pc-provider">
             <option value="">All providers</option>
             ${providers.map((p) => `<option value="${escapeHtml(p.name)}" ${filterProvider === p.name ? "selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
@@ -412,7 +415,23 @@ export async function renderPendingCommission(container, ctx) {
 
   function wireEvents() {
     container.querySelector("#pc-search")?.addEventListener("input", (e) => {
-      filterSearch = e.target.value;
+      filterSearchDraft = e.target.value;
+    });
+    container.querySelector("#pc-search")?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        filterSearch = filterSearchDraft;
+        page = 0;
+        draw();
+      }
+    });
+    container.querySelector("#pc-search-btn")?.addEventListener("click", () => {
+      filterSearch = filterSearchDraft;
+      page = 0;
+      draw();
+    });
+    container.querySelector("#pc-search-clear-btn")?.addEventListener("click", () => {
+      filterSearch = "";
+      filterSearchDraft = "";
       page = 0;
       draw();
     });

@@ -24,6 +24,7 @@ function commissionBadge(status) {
 export async function renderOrders(container, ctx) {
   const isAdmin = ctx.profile?.role === "admin";
   let search = "";
+  let searchDraft = ""; // text typed into the search box, not applied until "Search" is clicked
   let customers = [];
   let selected = new Set();
   let detailKey = null;
@@ -243,7 +244,11 @@ export async function renderOrders(container, ctx) {
             ? `<div class="alert error">${orphanCount} customer(s) have no saved order (shown with a "No Orders" badge below) -- their order/service-line save likely failed after the customer record was created. Review and delete or re-upload as needed.</div>`
             : ""
         }
-        <input type="text" id="search" placeholder="Search by name/phone/salesperson/account number" value="${escapeHtml(search)}" />
+        <div class="inline-form">
+          <input type="text" id="search" placeholder="Search by name/phone/salesperson/account number" value="${escapeHtml(searchDraft)}" style="flex:1" />
+          <button class="btn" id="search-btn">Search</button>
+          ${search.trim() ? `<button class="btn" id="search-clear-btn">Clear</button>` : ""}
+        </div>
         ${
           isAdmin
             ? `<div class="btn-row">
@@ -305,7 +310,21 @@ export async function renderOrders(container, ctx) {
     `;
 
     container.querySelector("#search").addEventListener("input", (e) => {
-      search = e.target.value;
+      searchDraft = e.target.value;
+    });
+    container.querySelector("#search").addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        search = searchDraft;
+        draw();
+      }
+    });
+    container.querySelector("#search-btn")?.addEventListener("click", () => {
+      search = searchDraft;
+      draw();
+    });
+    container.querySelector("#search-clear-btn")?.addEventListener("click", () => {
+      search = "";
+      searchDraft = "";
       draw();
     });
 
