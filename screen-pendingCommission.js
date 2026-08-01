@@ -89,6 +89,18 @@ export async function renderPendingCommission(container, ctx) {
     const { data: providerRows } = await supabase.from("providers").select("id, name").order("name");
     providers = providerRows || [];
 
+    // Lines already tracked on the Missing Commission screen (the legacy
+    // missing_commission_items list, still-unresolved rows only) should not
+    // also show here -- staff review those on Missing Commission instead.
+    // Fetch their linked order_service_lines ids so we can exclude them below.
+    const { data: missingItems } = await supabase
+      .from("missing_commission_items")
+      .select("matched_line_ids")
+      .eq("resolved", false);
+    const missingLineIds = new Set(
+      (missingItems || []).flatMap((item) => item.matched_line_ids || [])
+    );
+
     const { data, error } = await supabase
       .from("order_service_lines")
       .select(
@@ -103,7 +115,7 @@ export async function renderPendingCommission(container, ctx) {
       return;
     }
     loadError = null;
-    lines = data || [];
+    lines = (data || []).filter((l) => !missingLineIds.has(l.id));
   }
 
   async function lookupReport(accountNumber) {
@@ -315,7 +327,8 @@ export async function renderPendingCommission(container, ctx) {
       <div class="screen">
         <h2>Pending Commission</h2>
         <p class="muted">
-          All order lines currently waiting on a commission report. Click a row for full detail -- expected commission,
+          All order lines currently waiting on a commission report, except lines already tracked on the Missing
+          Commission screen -- review those there instead. Click a row for full detail -- expected commission,
           ordered service, and a live lookup of any commission report already uploaded for that account -- then choose
           Keep Pending, Mark Received, or Confirmed Missing. Only "Confirmed Missing" sends a line to the Missing
           Commission follow-up list; the "21+ days" badge below is just a visual warning, nothing moves automatically.
