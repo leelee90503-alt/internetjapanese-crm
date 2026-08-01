@@ -32,7 +32,7 @@ function downloadAsExcel(rows, legacyRows) {
       "Order Date": l.orders?.order_date || "",
       "Order #": l.orders?.order_number || "",
       "Expected Commission": l.expected_commission === null || l.expected_commission === undefined ? "" : Number(l.expected_commission),
-      "Confirmed Missing On": l.resolution_at ? new Date(l.resolution_at).toLocaleDateString() : "",
+      "Missing Commission Date": l.resolution_at ? new Date(l.resolution_at).toLocaleDateString() : "",
       Note: l.resolution_note || "",
     })),
     ...(legacyRows || []).map((item) => ({
@@ -44,7 +44,7 @@ function downloadAsExcel(rows, legacyRows) {
       "Order Date": item.sales_date || "",
       "Order #": item.source_order_number || "",
       "Expected Commission": item.price === null || item.price === undefined ? "" : Number(item.price),
-      "Confirmed Missing On": "",
+      "Missing Commission Date": item.created_at ? new Date(item.created_at).toLocaleDateString() : "",
       Note: item.review_note || item.status_notes || "",
     })),
   ];
@@ -58,7 +58,7 @@ function downloadAsExcel(rows, legacyRows) {
     { wch: 12 }, // Order Date
     { wch: 18 }, // Order #
     { wch: 16 }, // Expected Commission
-    { wch: 16 }, // Confirmed Missing On
+    { wch: 18 }, // Missing Commission Date
     { wch: 40 }, // Note
   ];
   const wb = XLSX.utils.book_new();
@@ -126,6 +126,13 @@ export async function renderMissingCommission(container, ctx) {
     });
   }
 
+  function fmtDate(d) {
+    if (!d) return "-";
+    const dt = new Date(d);
+    if (isNaN(dt.getTime())) return "-";
+    return dt.toLocaleDateString();
+  }
+
   function rowHtml(l) {
     const days = daysSince(l.orders?.order_date);
     return `
@@ -136,6 +143,7 @@ export async function renderMissingCommission(container, ctx) {
         <td>${escapeHtml(l.plan_name || "-")}</td>
         <td>${escapeHtml(l.orders?.order_date || "-")}${days !== null ? ` <span class="muted">(${days}d ago)</span>` : ""}</td>
         <td>${fmtMoney(l.expected_commission)}</td>
+        <td>${fmtDate(l.resolution_at)}</td>
         <td>${escapeHtml(l.resolution_note || "-")}</td>
         <td>
           <button class="btn small" data-back-to-pending="${l.id}" ${busy ? "disabled" : ""}>Back to Pending</button>
@@ -154,6 +162,7 @@ export async function renderMissingCommission(container, ctx) {
         <td>${escapeHtml(item.description || "-")}</td>
         <td>${escapeHtml(item.sales_date || "-")}</td>
         <td>${fmtMoney(item.price)}</td>
+        <td>${fmtDate(item.created_at)}</td>
         <td>${escapeHtml(item.review_note || item.status_notes || "-")}</td>
         <td>
           <button class="btn small primary" data-legacy-received="${item.id}" ${busy ? "disabled" : ""}>Mark Received</button>
@@ -206,11 +215,11 @@ export async function renderMissingCommission(container, ctx) {
           <thead>
             <tr>
               <th>Customer</th><th>Account #</th><th>Provider</th><th>Plan</th>
-              <th>Order Date</th><th>Expected</th><th>Note</th><th></th>
+              <th>Order Date</th><th>Expected</th><th>Missing Commission Date</th><th>Note</th><th></th>
             </tr>
           </thead>
           <tbody>
-            ${rows.map(rowHtml).join("") || `<tr><td colspan="8" class="muted">${searchTerm.trim() ? "No matches for this search." : "Nothing confirmed missing right now."}</td></tr>`}
+            ${rows.map(rowHtml).join("") || `<tr><td colspan="9" class="muted">${searchTerm.trim() ? "No matches for this search." : "Nothing confirmed missing right now."}</td></tr>`}
           </tbody>
         </table>
 
@@ -225,11 +234,11 @@ export async function renderMissingCommission(container, ctx) {
             <thead>
               <tr>
                 <th>Customer</th><th>Account #</th><th>Provider</th><th>Missing</th>
-                <th>Sales Date</th><th>Price</th><th>Note</th><th></th>
+                <th>Sales Date</th><th>Price</th><th>Missing Commission Date</th><th>Note</th><th></th>
               </tr>
             </thead>
             <tbody>
-              ${legacyRows.map(legacyRowHtml).join("") || `<tr><td colspan="8" class="muted">No matches for this search.</td></tr>`}
+              ${legacyRows.map(legacyRowHtml).join("") || `<tr><td colspan="9" class="muted">No matches for this search.</td></tr>`}
             </tbody>
           </table>`
             : ""
