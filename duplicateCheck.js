@@ -54,11 +54,36 @@ export async function checkDuplicateSuspect({ name, phone, accountNumber }) {
     }
   }
 
+  // When a possible duplicate is found, also pull the matched customer's
+  // existing service lines so staff can see on the review screen exactly
+  // what that customer already has (service/provider/account/status)
+  // instead of just a bare "possible duplicate" name+phone badge -- that's
+  // what actually lets staff tell a real re-upload apart from a customer
+  // who genuinely has a new service line today.
+  let existingServices = [];
+  if (matchedCustomerId) {
+    const { data: svcData, error: svcErr } = await supabase
+      .from("order_service_lines")
+      .select("plan_name, account_number, status, providers(name), services(name), orders!inner(customer_id, order_date)")
+      .eq("orders.customer_id", matchedCustomerId)
+      .limit(50);
+    if (!svcErr && svcData) {
+      existingServices = svcData.map((l) => ({
+        service: l.services?.name || l.plan_name || "?",
+        provider: l.providers?.name || null,
+        accountNumber: l.account_number || null,
+        status: l.status || null,
+        orderDate: l.orders?.order_date || null,
+      }));
+    }
+  }
+
   return {
     suspect: reasons.length > 0,
     reason: reasons.join(", "),
     matchedCustomerId,
     matchedCustomerLabel,
+    existingServices,
   };
 }
 

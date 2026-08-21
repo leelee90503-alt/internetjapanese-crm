@@ -1275,7 +1275,22 @@ export async function renderCustomerUpload(container, ctx) {
       </div>
       ${
         b.duplicate.suspect
-          ? `<label class="checkbox-inline"><input type="checkbox" class="b-link-existing" ${b.linkToExisting ? "checked" : ""} /> Treat as the same as the existing customer (don't create a new one)</label>`
+          ? `<label class="checkbox-inline"><input type="checkbox" class="b-link-existing" ${b.linkToExisting ? "checked" : ""} /> Treat as the same as the existing customer (don't create a new one)</label>
+            <div class="muted" style="margin-bottom:8px">
+              ${
+                b.duplicate.existingServices && b.duplicate.existingServices.length > 0
+                  ? "Existing customer already has: " +
+                    b.duplicate.existingServices
+                      .map(
+                        (s) =>
+                          `${escapeHtml(s.service)}${s.provider ? " (" + escapeHtml(s.provider) + ")" : ""}${
+                            s.accountNumber ? " -- acct " + escapeHtml(s.accountNumber) : ""
+                          }${s.status ? " [" + escapeHtml(s.status) + "]" : ""}`
+                      )
+                      .join(" &middot; ")
+                  : "Existing customer has no service lines on file yet."
+              }
+            </div>`
           : ""
       }
       <div class="grid4">
