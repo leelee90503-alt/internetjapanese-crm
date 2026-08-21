@@ -28,6 +28,19 @@ const FIELD_DEFS = [
 
 const AMOUNT_EPSILON = 0.01;
 
+// A negative Commission Amount in a provider's report means a chargeback --
+// the provider is clawing back commission already paid (e.g. the customer
+// canceled early), not reporting a fresh amount to compare against
+// expected_commission. These rows must never overwrite the matched line's
+// actual_commission_amount/status (that would erase the record of the
+// original commission having been received) -- they're recorded as their
+// own commission_report_rows entry (matched_order_service_line_id still
+// set, so the line/customer/product is known) and surfaced on the
+// Chargebacks report instead.
+function isChargebackRow(r) {
+  return r.commissionAmount != null && Number(r.commissionAmount) < 0;
+}
+
 // ---- multi-line-per-account matching helpers ----
 // Some providers (e.g. Spectrum) send one commission report row per line
 // within an account (Mobile Line 1, Mobile Line 1:Unlimited, Mobile Line 2,
@@ -376,7 +389,7 @@ export async function renderCommissionReports(container, ctx) {
     container.innerHTML = `
       <div class="screen">
         <h2>Step 3: Review &amp; Match</h2>
-        <p class="muted">Green = auto-matched and amount agrees. Yellow = mismatched amount (will be saved but flagged). Rows with no match need a manual selection before confirming.</p>
+        <p class="muted">Green = auto-matched and amount agrees. Yellow = mismatched amount (will be saved but flagged). Purple = a negative amount, i.e. a chargeback -- confirming it will NOT overwrite this line's received commission, it's recorded separately and shown on the Chargebacks report. Rows with no match need a manual selection before confirming.</p>
         <div class="btn-row">
           <button class="btn primary" id="confirm-btn">Confirm &amp; Save</button>
           <button class="btn" id="back-to-mapping-btn">Back (Column Mapping)</button>
@@ -392,7 +405,9 @@ export async function renderCommissionReports(container, ctx) {
             ${reportRows
               .map((r) => {
                 const line = linesForProvider.find((l) => l.id === r.matchedLineId);
+                const chargeback = isChargebackRow(r);
                 const mismatch =
+                  !chargeback &&
                   line &&
                   line.expected_commission != null &&
                   r.commissionAmount != null &&
@@ -407,7 +422,7 @@ export async function renderCommissionReports(container, ctx) {
                   <td>
                     ${
                       line
-                        ? `<span class="badge ${mismatch ? "error" : "ok"}">${mismatch ? "Mismatch" : "Matched"}</span>
+                        ? `<span class="badge ${chargeback ? "chargeback" : mismatch ? "error" : "ok"}">${chargeback ? "Chargeback" : mismatch ? "Mismatch" : "Matched"}</span>
                            <div class="muted">${escapeHtml(lineLabel(line))}</div>`
                         : `<span class="badge warn">No match</span>`
                     }
@@ -498,22 +513,32 @@ export async function renderCommissionReports(container, ctx) {
     for (const r of toConfirm) {
       try {
         const line = linesForProvider.find((l) => l.id === r.matchedLineId);
+        const chargeback = isChargebackRow(r);
         const mismatch =
+          !chargeback &&
           line &&
           line.expected_commission != null &&
           r.commissionAmount != null &&
           Math.abs(Number(line.expected_commission) - Number(r.commissionAmount)) > AMOUNT_EPSILON;
 
-        const { error: updErr } = await supabase
-          .from("order_service_lines")
-          .update({
-            actual_commission_amount: r.commissionAmount,
-            commission_matched_at: new Date().toISOString(),
-            commission_matched_by: ctx.profile.id,
-            status: mismatch ? "mismatch" : "received",
-          })
-          .eq("id", r.matchedLineId);
-        if (updErr) throw updErr;
+        // Chargebacks are a separate financial event from the original
+        // commission -- leave the matched line's actual_commission_amount
+        // and status exactly as they are (don't clobber a real "received"
+        // amount with a negative number). The chargeback itself is still
+        // recorded below via commission_report_rows, which is what the
+        // Chargebacks report reads from.
+        if (!chargeback) {
+          const { error: updErr } = await supabase
+            .from("order_service_lines")
+            .update({
+              actual_commission_amount: r.commissionAmount,
+              commission_matched_at: new Date().toISOString(),
+              commission_matched_by: ctx.profile.id,
+              status: mismatch ? "mismatch" : "received",
+            })
+            .eq("id", r.matchedLineId);
+          if (updErr) throw updErr;
+        }
 
         const { error: rowErr } = await supabase.from("commission_report_rows").insert({
           batch_id: batch.id,
