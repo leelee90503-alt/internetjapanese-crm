@@ -274,6 +274,7 @@ export async function renderCustomerUpload(container, ctx) {
   let salespeople = [];
   let commissionRates = [];
   let busyMsg = "";
+  let latestOrderInfo = null; // { date, customerName } — most recent order_date already on file
 
   async function loadMasters() {
     const [s, p, sp, cr] = await Promise.all([
@@ -286,6 +287,26 @@ export async function renderCustomerUpload(container, ctx) {
     providers = p.data || [];
     salespeople = sp.data || [];
     commissionRates = cr.data || [];
+  }
+
+  // So staff can tell at a glance which date to start entering from on the
+  // next upload, show the most recent order_date already saved in the
+  // system (with which customer it belongs to) right on the upload screen.
+  async function loadLatestOrderInfo() {
+    const { data, error } = await supabase
+      .from("orders")
+      .select("order_date, customers(name)")
+      .not("order_date", "is", null)
+      .order("order_date", { ascending: false })
+      .limit(1);
+    if (!error && data && data.length > 0) {
+      latestOrderInfo = {
+        date: data[0].order_date,
+        customerName: data[0].customers?.name || null,
+      };
+    } else {
+      latestOrderInfo = null;
+    }
   }
 
   // Shared header (title + Reset) rendered at the top of every step, so
@@ -341,6 +362,16 @@ export async function renderCustomerUpload(container, ctx) {
       <div class="screen">
         ${screenHeaderHtml("Customer Excel Upload")}
         <p class="muted">Upload an Excel (.xlsx/.csv) file, or two files that share an Order Id column and need to be matched and merged first. Everything goes through column mapping and a review/confirm step before being saved as real customer and order data.</p>
+        <div class="card" style="background:#eff6ff;border-color:#bfdbfe">
+          ${
+            latestOrderInfo
+              ? `<strong>Most recent order date on file: ${escapeHtml(latestOrderInfo.date)}</strong>${
+                  latestOrderInfo.customerName ? ` (${escapeHtml(latestOrderInfo.customerName)})` : ""
+                }
+                 <p class="muted" style="margin:4px 0 0">다음 업로드는 이 날짜 다음날부터 입력하시면 됩니다. / Enter new data starting the day after this date.</p>`
+              : `<p class="muted" style="margin:0">No orders on file yet — this will be the first upload.</p>`
+          }
+        </div>
         <div class="card">
           <label>Provider for this upload
             <select id="provider-select-upload">
@@ -1694,9 +1725,10 @@ export async function renderCustomerUpload(container, ctx) {
       (followUpErrors.length
         ? ` ${followUpErrors.length} follow-up(s) failed to save (customer/order were saved fine): ` + followUpErrors.join(" / ")
         : "");
+    if (successCount > 0) await loadLatestOrderInfo();
     drawReviewStep();
   }
 
-  await loadMasters();
+  await Promise.all([loadMasters(), loadLatestOrderInfo()]);
   drawUploadStep();
 }
