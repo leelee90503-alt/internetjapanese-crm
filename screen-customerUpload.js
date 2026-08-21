@@ -10,7 +10,16 @@ import {
 } from "./normalize.js";
 
 const FIELD_DEFS = [
-  { key: "name", label: "Name", guesses: ["name", "이름", "고객명", "customer"] },
+  {
+    key: "order_id",
+    label: "Order Id (optional — rows sharing the same value are grouped into one customer/order with multiple service lines, e.g. a Bundle Orders export with one row per service)",
+    guesses: ["order id", "orderid", "주문번호", "order #", "order#"],
+  },
+  {
+    key: "name",
+    label: "Name",
+    guesses: ["customer full name", "full name", "customer name", "name", "이름", "고객명", "customer"],
+  },
   { key: "phone", label: "Phone", guesses: ["phone", "전화", "연락처", "tel"] },
   { key: "address", label: "Address", guesses: ["address", "주소"] },
   {
@@ -18,9 +27,13 @@ const FIELD_DEFS = [
     label: "Account Number",
     guesses: ["account", "acc", "계정번호", "계정"],
   },
-  { key: "order_date", label: "Order Date", guesses: ["date", "날짜", "가입일", "order date"] },
+  { key: "order_date", label: "Order Date", guesses: ["order date", "date", "날짜", "가입일"] },
   { key: "provider", label: "Provider", guesses: ["provider", "프로바이더", "carrier"] },
-  { key: "service", label: "Service / Plan", guesses: ["service", "plan", "서비스", "상품"] },
+  {
+    key: "service",
+    label: "Service / Plan",
+    guesses: ["productname", "product name", "service", "plan", "서비스", "상품", "product", "package"],
+  },
   {
     key: "salesperson",
     label: "Salesperson",
@@ -421,13 +434,12 @@ export async function renderCustomerUpload(container, ctx) {
     const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
     headers = (rows[0] || []).map((h) => String(h ?? "").trim());
     dataRows = rows.slice(1).filter((r) => r.some((c) => String(c ?? "").trim() !== ""));
-    mapping = {};
-    FIELD_DEFS.forEach((f) => {
-      const idx = headers.findIndex((h) =>
-        f.guesses.some((g) => h.toLowerCase().includes(g.toLowerCase()))
-      );
-      mapping[f.key] = idx;
-    });
+    // Two-pass exact-match-then-substring detection (same algorithm as the
+    // two-file mode below) so a column that exactly matches one field's
+    // guess (e.g. "Customer Full Name") is claimed before a generic
+    // substring match on an unrelated, often-blank column (e.g. "Order
+    // Orgin Name" or "Service Agreement Number") can steal it.
+    mapping = autoDetectMapping(headers, FIELD_DEFS);
   }
 
   function loadSheetA(name) {
@@ -650,71 +662,121 @@ export async function renderCustomerUpload(container, ctx) {
     return row[idx] ?? "";
   }
 
+  function newSingleModeBlock(row, sourceOrderId) {
+    return {
+      id: crypto.randomUUID(),
+      name: String(cell(row, "name") ?? "").trim(),
+      phone: String(cell(row, "phone") ?? "").trim(),
+      address: String(cell(row, "address") ?? "").trim(),
+      orderDate: normalizeDate(cell(row, "order_date")),
+      salesperson: String(cell(row, "salesperson") ?? "").trim(),
+      memo: String(cell(row, "memo") ?? "").trim(),
+      excluded: false,
+      duplicate: { suspect: false, reason: "", matchedCustomerId: null, matchedCustomerLabel: null },
+      linkToExisting: false,
+      sourceOrderId: sourceOrderId || null,
+      orderNumber: null,
+      category: null,
+      needsReview: false,
+      reviewReasons: [],
+      followUpNeeded: false,
+      followUpDate: null,
+      followUpReason: "",
+      lines: [],
+    };
+  }
+
+  // Appends one service line to `current` from `row`. `mobileLineCounterBox`
+  // is a mutable {n} shared across every row of the same block/order so
+  // sequential Mobile lines price against "Mobile Line 1", "Mobile Line 2",
+  // etc. (see autoLookupCommission).
+  function pushSingleModeLine(current, row, mobileLineCounterBox) {
+    const providerRaw = String(cell(row, "provider") ?? "").trim();
+    const providerMatch = matchMasterPrioritized(providers, [providerRaw]);
+    const provider = providerMatch.id || (defaultProviderId || null);
+    // Service is taken directly from the uploaded file's Service/Product
+    // column, verbatim — it is no longer matched against the Services
+    // master list. The exact text is what gets saved (and auto-registered
+    // into Master Data on save if it's new), so it always reflects the
+    // source file instead of "?" or a fuzzy-matched substitute.
+    const serviceName = String(cell(row, "service") ?? "").trim();
+    if (isMobileText(serviceName)) mobileLineCounterBox.n += 1;
+    const expectedCommissionFromFile = Number(cell(row, "expected_commission")) || null;
+    current.lines.push({
+      id: crypto.randomUUID(),
+      excluded: false,
+      serviceName,
+      providerId: provider,
+      providerMatched: providerMatch.matched,
+      providerRaw: providerMatch.raw,
+      accountNumberRaw: String(cell(row, "account_number") ?? "").trim(),
+      accountNumber: normalizeAccountNumber(cell(row, "account_number")),
+      // The uploaded file's own Expected Commission column wins if present;
+      // otherwise auto-look-up the $ amount from Master Data > Commission
+      // Rates by provider + plan name (staff can still edit it below).
+      expectedCommission:
+        expectedCommissionFromFile ??
+        autoLookupCommission(commissionRates, provider, [serviceName], mobileLineCounterBox.n),
+      units: null,
+      unitsInstalled: null,
+      mobileLinesOrdered: null,
+      mobileLinesInstalled: null,
+      planName: null,
+    });
+  }
+
+  // Two ways to group uploaded rows into customer/order "blocks":
+  //  - If an "Order Id" column is mapped, every row sharing the same Order
+  //    Id value is grouped into one block with one service line per row —
+  //    this is the shape of a "Bundle Orders"-style export where the full
+  //    customer info repeats on every service line (TV/Internet/Mobile/...)
+  //    instead of being blank on continuation rows.
+  //  - Otherwise, falls back to the original behavior: a non-blank Name
+  //    starts a new block, and rows with a blank Name are additional
+  //    service lines for the block started by the most recent non-blank
+  //    Name row (the shape of manually-built upload templates).
   async function buildBlocks() {
     blocks = [];
-    let current = null;
-    let mobileLineCounter = 0; // resets per block -- see autoLookupCommission
-    for (const row of dataRows) {
-      const name = String(cell(row, "name") ?? "").trim();
-      const isNewBlock = name !== "";
-      if (isNewBlock) {
-        mobileLineCounter = 0;
-        current = {
-          id: crypto.randomUUID(),
-          name,
-          phone: String(cell(row, "phone") ?? "").trim(),
-          address: String(cell(row, "address") ?? "").trim(),
-          orderDate: normalizeDate(cell(row, "order_date")),
-          salesperson: String(cell(row, "salesperson") ?? "").trim(),
-          memo: String(cell(row, "memo") ?? "").trim(),
-          excluded: false,
-          duplicate: { suspect: false, reason: "", matchedCustomerId: null, matchedCustomerLabel: null },
-          linkToExisting: false,
-          sourceOrderId: null,
-          orderNumber: null,
-          category: null,
-          needsReview: false,
-          reviewReasons: [],
-          followUpNeeded: false,
-          followUpDate: null,
-          followUpReason: "",
-          lines: [],
-        };
-        blocks.push(current);
-      }
-      if (!current) continue; // skip rows with no name if they appear before any block starts (formatting error)
-      const providerRaw = String(cell(row, "provider") ?? "").trim();
-      const providerMatch = matchMasterPrioritized(providers, [providerRaw]);
-      const provider = providerMatch.id || (defaultProviderId || null);
-      // Service is taken directly from the uploaded file's Service/Product
-      // column, verbatim — it is no longer matched against the Services
-      // master list. The exact text is what gets saved (and auto-registered
-      // into Master Data on save if it's new), so it always reflects the
-      // source file instead of "?" or a fuzzy-matched substitute.
-      const serviceName = String(cell(row, "service") ?? "").trim();
-      if (isMobileText(serviceName)) mobileLineCounter += 1;
-      const expectedCommissionFromFile = Number(cell(row, "expected_commission")) || null;
-      current.lines.push({
-        id: crypto.randomUUID(),
-        excluded: false,
-        serviceName,
-        providerId: provider,
-        providerMatched: providerMatch.matched,
-        providerRaw: providerMatch.raw,
-        accountNumberRaw: String(cell(row, "account_number") ?? "").trim(),
-        accountNumber: normalizeAccountNumber(cell(row, "account_number")),
-        // The uploaded file's own Expected Commission column wins if present;
-        // otherwise auto-look-up the $ amount from Master Data > Commission
-        // Rates by provider + plan name (staff can still edit it below).
-        expectedCommission:
-          expectedCommissionFromFile ??
-          autoLookupCommission(commissionRates, provider, [serviceName], mobileLineCounter),
-        units: null,
-        unitsInstalled: null,
-        mobileLinesOrdered: null,
-        mobileLinesInstalled: null,
-        planName: null,
+    const orderIdMapped = mapping["order_id"] !== undefined && mapping["order_id"] !== -1;
+
+    if (orderIdMapped) {
+      const groups = new Map(); // Order Id value (or a synthetic per-row key) -> rows[]
+      const groupOrder = [];
+      dataRows.forEach((row, i) => {
+        const oid = String(cell(row, "order_id") ?? "").trim();
+        const name = String(cell(row, "name") ?? "").trim();
+        if (!oid && !name) return; // fully blank row, skip
+        const key = oid || `__row${i}`; // rows with no Order Id each stand alone
+        if (!groups.has(key)) {
+          groups.set(key, []);
+          groupOrder.push(key);
+        }
+        groups.get(key).push(row);
       });
+      for (const key of groupOrder) {
+        const rows = groups.get(key);
+        const firstRow = rows[0];
+        if (!String(cell(firstRow, "name") ?? "").trim()) continue; // no usable name for this group
+        const oidValue = key.startsWith("__row") ? null : key;
+        const current = newSingleModeBlock(firstRow, oidValue);
+        blocks.push(current);
+        const mobileLineCounterBox = { n: 0 };
+        rows.forEach((row) => pushSingleModeLine(current, row, mobileLineCounterBox));
+      }
+    } else {
+      let current = null;
+      let mobileLineCounterBox = { n: 0 };
+      for (const row of dataRows) {
+        const name = String(cell(row, "name") ?? "").trim();
+        const isNewBlock = name !== "";
+        if (isNewBlock) {
+          mobileLineCounterBox = { n: 0 };
+          current = newSingleModeBlock(row, null);
+          blocks.push(current);
+        }
+        if (!current) continue; // skip rows with no name if they appear before any block starts (formatting error)
+        pushSingleModeLine(current, row, mobileLineCounterBox);
+      }
     }
 
     // TV service (TV Choice / TV Stream / TV Select Plus / ...) is normally
