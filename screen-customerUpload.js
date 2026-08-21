@@ -20,12 +20,25 @@ const FIELD_DEFS = [
     label: "Name",
     guesses: ["customer full name", "full name", "customer name", "name", "이름", "고객명", "customer"],
   },
-  { key: "phone", label: "Phone", guesses: ["phone", "전화", "연락처", "tel"] },
+  {
+    key: "phone",
+    label: "Phone",
+    // "servicephone" listed before the bare "phone"/"tel" substrings so an
+    // exact header like "ServicePhone" (e.g. the CRM's own "Order Info"
+    // export) is claimed here in the exact-match pass, before a generic
+    // substring pass could otherwise grab an unrelated column like
+    // "Campaign PhoneNo" (which is usually blank) and leave Phone empty.
+    guesses: ["servicephone", "service phone", "phone", "전화", "연락처", "tel"],
+  },
   { key: "address", label: "Address", guesses: ["address", "주소"] },
   {
     key: "account_number",
     label: "Account Number",
-    guesses: ["account", "acc", "계정번호", "계정"],
+    // "account number" listed first so the exact-match pass claims that
+    // exact header before a generic "account" substring match could
+    // otherwise grab an unrelated column like "Account Manager"/"Account
+    // Executive" (both usually blank) and leave Account Number empty.
+    guesses: ["account number", "account", "acc", "계정번호", "계정"],
   },
   { key: "order_date", label: "Order Date", guesses: ["order date", "date", "날짜", "가입일"] },
   { key: "provider", label: "Provider", guesses: ["provider", "프로바이더", "carrier"] },
@@ -37,7 +50,11 @@ const FIELD_DEFS = [
   {
     key: "salesperson",
     label: "Salesperson",
-    guesses: ["sales", "세일즈", "담당자", "sold by", "sale by"],
+    // "salesrep name" listed first so the exact-match pass claims that exact
+    // header (the actual person's name) before a generic "sales" substring
+    // match could otherwise grab an unrelated ID/label column like "Sales
+    // Id" or "SalesIdName" (a numeric code / channel label, not a name).
+    guesses: ["salesrep name", "sales rep name", "sales", "세일즈", "담당자", "sold by", "sale by"],
   },
   {
     key: "expected_commission",
