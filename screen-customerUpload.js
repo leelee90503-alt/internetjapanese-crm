@@ -523,11 +523,24 @@ export async function renderCustomerUpload(container, ctx) {
       step = "upload";
       drawUploadStep();
     });
-    container.querySelector("#next-btn").addEventListener("click", async () => {
+    container.querySelector("#next-btn").addEventListener("click", async (e) => {
       defaultProviderId = container.querySelector("#default-provider").value;
-      await buildBlocks();
-      step = "review";
-      drawReviewStep();
+      // buildBlocks() runs a duplicate check against Supabase for every
+      // detected customer block -- with a large file (dozens+ of blocks)
+      // this can take a few seconds, and with no feedback the button looks
+      // unresponsive. Disable it and show progress instead.
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = "Checking for duplicates...";
+      try {
+        await buildBlocks();
+        step = "review";
+        drawReviewStep();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Next: Review & Confirm";
+        alert("Failed to prepare the review screen: " + (err.message || err));
+      }
     });
   }
 
@@ -826,16 +839,21 @@ export async function renderCustomerUpload(container, ctx) {
       b.needsReview = reasons.length > 0;
     }
 
-    // Duplicate-suspect check (name + phone + account number combination; order date is excluded from the criteria)
-    for (const b of blocks) {
-      const firstAccount = b.lines[0]?.accountNumber || "";
-      const res = await checkDuplicateSuspect({
-        name: b.name,
-        phone: b.phone,
-        accountNumber: firstAccount,
-      });
-      b.duplicate = res;
-    }
+    // Duplicate-suspect check (name + phone + account number combination; order date is excluded from the criteria).
+    // Run every block's check in parallel instead of one-at-a-time -- with
+    // large uploads (e.g. a Bundle Orders file producing 70+ blocks), a
+    // sequential loop here means 70+ round-trips back-to-back before the
+    // review screen appears, which reads as the "Next" button doing nothing.
+    await Promise.all(
+      blocks.map(async (b) => {
+        const firstAccount = b.lines[0]?.accountNumber || "";
+        b.duplicate = await checkDuplicateSuspect({
+          name: b.name,
+          phone: b.phone,
+          accountNumber: firstAccount,
+        });
+      })
+    );
 
     sortBlocksByReviewPriority();
   }
@@ -1100,10 +1118,19 @@ export async function renderCustomerUpload(container, ctx) {
         r.excluded = !e.target.checked;
       });
     });
-    container.querySelector("#merge-next-btn").addEventListener("click", async () => {
-      await buildBlocksFromMerge();
-      step = "review";
-      drawReviewStep();
+    container.querySelector("#merge-next-btn").addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.textContent = "Checking for duplicates...";
+      try {
+        await buildBlocksFromMerge();
+        step = "review";
+        drawReviewStep();
+      } catch (err) {
+        btn.disabled = false;
+        btn.textContent = "Next: Review & Confirm";
+        alert("Failed to prepare the review screen: " + (err.message || err));
+      }
     });
   }
 
@@ -1175,16 +1202,18 @@ export async function renderCustomerUpload(container, ctx) {
       });
     }
 
-    // Duplicate-suspect check (same criteria as single-file mode)
-    for (const b of blocks) {
-      const firstAccount = b.lines[0]?.accountNumber || "";
-      const res = await checkDuplicateSuspect({
-        name: b.name,
-        phone: b.phone,
-        accountNumber: firstAccount,
-      });
-      b.duplicate = res;
-    }
+    // Duplicate-suspect check (same criteria as single-file mode, run in
+    // parallel across blocks -- see the comment on the single-file version).
+    await Promise.all(
+      blocks.map(async (b) => {
+        const firstAccount = b.lines[0]?.accountNumber || "";
+        b.duplicate = await checkDuplicateSuspect({
+          name: b.name,
+          phone: b.phone,
+          accountNumber: firstAccount,
+        });
+      })
+    );
 
     sortBlocksByReviewPriority();
   }

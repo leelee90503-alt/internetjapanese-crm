@@ -16,36 +16,41 @@ export async function checkDuplicateSuspect({ name, phone, accountNumber }) {
   const normPhone = normalizePhone(phone);
   const normAccount = normalizeAccountNumber(accountNumber);
 
-  if (name && normPhone) {
-    const { data, error } = await supabase
-      .from("customers")
-      .select("id, name, phone")
-      .ilike("name", name.trim())
-      .limit(5);
-    if (!error && data) {
-      const hit = data.find((c) => normalizePhone(c.phone) === normPhone);
-      if (hit) {
-        reasons.push("Name+phone match");
-        matchedCustomerId = hit.id;
-        matchedCustomerLabel = `${hit.name} (${hit.phone || "-"})`;
-      }
+  // These two lookups are independent of each other, so run them in
+  // parallel rather than one-after-another -- with large uploads (e.g. a
+  // Bundle Orders file with 70+ blocks), buildBlocks() itself already runs
+  // one checkDuplicateSuspect() call per block in parallel (see
+  // screen-customerUpload.js), so halving each call's own round-trip count
+  // matters for how long the whole "Next: Review & Confirm" step takes.
+  const [nameRes, accountRes] = await Promise.all([
+    name && normPhone
+      ? supabase.from("customers").select("id, name, phone").ilike("name", name.trim()).limit(5)
+      : Promise.resolve({ data: null, error: null }),
+    normAccount
+      ? supabase
+          .from("order_service_lines")
+          .select("id, account_number, order_id, orders(customer_id, customers(name, phone))")
+          .eq("account_number", normAccount)
+          .limit(5)
+      : Promise.resolve({ data: null, error: null }),
+  ]);
+
+  if (name && normPhone && !nameRes.error && nameRes.data) {
+    const hit = nameRes.data.find((c) => normalizePhone(c.phone) === normPhone);
+    if (hit) {
+      reasons.push("Name+phone match");
+      matchedCustomerId = hit.id;
+      matchedCustomerLabel = `${hit.name} (${hit.phone || "-"})`;
     }
   }
 
-  if (normAccount) {
-    const { data, error } = await supabase
-      .from("order_service_lines")
-      .select("id, account_number, order_id, orders(customer_id, customers(name, phone))")
-      .eq("account_number", normAccount)
-      .limit(5);
-    if (!error && data && data.length > 0) {
-      reasons.push("Account number match");
-      if (!matchedCustomerId) {
-        const line = data[0];
-        const cust = line.orders?.customers;
-        matchedCustomerId = line.orders?.customer_id || null;
-        matchedCustomerLabel = cust ? `${cust.name} (${cust.phone || "-"})` : null;
-      }
+  if (normAccount && !accountRes.error && accountRes.data && accountRes.data.length > 0) {
+    reasons.push("Account number match");
+    if (!matchedCustomerId) {
+      const line = accountRes.data[0];
+      const cust = line.orders?.customers;
+      matchedCustomerId = line.orders?.customer_id || null;
+      matchedCustomerLabel = cust ? `${cust.name} (${cust.phone || "-"})` : null;
     }
   }
 
