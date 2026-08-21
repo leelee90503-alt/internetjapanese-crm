@@ -41,6 +41,21 @@ function isChargebackRow(r) {
   return r.commissionAmount != null && Number(r.commissionAmount) < 0;
 }
 
+// Detects a TV-plan rename: the matched line's stored plan_name and the
+// report's product name are both TV plans but spelled differently (e.g.
+// "TV Stream" on file, "TV Essentials" on the report). Returns the OLD name
+// to display/save if this looks like a rename, otherwise null. Shared by
+// buildRows() (auto-match via pickCandidate's rename tier) and
+// readRowFromTr() (a manual match the admin picked by hand) so both paths
+// get the same "update plan_name to the new name" treatment.
+function renamedFromIfTvRename(line, productNameRaw) {
+  if (!line || !line.plan_name) return null;
+  const product = normPlan(productNameRaw);
+  if (!product || !isTvServiceText(product) || !isTvServiceText(line.plan_name)) return null;
+  if (normPlan(line.plan_name) === product) return null;
+  return line.plan_name;
+}
+
 // ---- multi-line-per-account matching helpers ----
 // Some providers (e.g. Spectrum) send one commission report row per line
 // within an account (Mobile Line 1, Mobile Line 1:Unlimited, Mobile Line 2,
@@ -54,6 +69,15 @@ function normPlan(s) {
 
 function isMobileProductText(s) {
   return /mobile|\bline\s*\d*/.test(normPlan(s));
+}
+
+// Matches "TV Choice" / "TV Stream" / "TV Essentials" / etc. -- any plan
+// name with a standalone "TV" word in it. Used both for the rename fallback
+// in pickCandidate() and for isChargebackRow's sibling renamedFromIfTvRename()
+// above (defined earlier in this file, before this function -- function
+// declarations are hoisted, so the forward reference is fine).
+function isTvServiceText(s) {
+  return /\btv\b/i.test(String(s ?? ""));
 }
 
 function mobileLineOrdinal(s) {
@@ -100,6 +124,20 @@ function pickCandidate(candidates, productNameRaw) {
     if (mobileCandidates[n - 1]) return mobileCandidates[n - 1];
   }
 
+  // 4) TV plan rename: providers occasionally rename a TV plan (e.g. "TV
+  //    Stream" becomes "TV Essentials"). If the reported product is a TV
+  //    plan and exactly one not-yet-claimed TV-category line remains on
+  //    this account, treat it as the same line under its new name rather
+  //    than leaving it unmatched -- renamedFromIfTvRename() (used by the
+  //    caller) then flags the old->new name so confirmRows() updates
+  //    plan_name and the review screen tells the admin what changed. If
+  //    more than one TV candidate remains, stay unmatched -- same "don't
+  //    guess" rule as above.
+  if (isTvServiceText(product)) {
+    const tvCandidates = candidates.filter((l) => isTvServiceText(l.plan_name));
+    if (tvCandidates.length === 1) return tvCandidates[0];
+  }
+
   // Multiple candidates exist and a product name WAS given, but it didn't
   // match any of them (e.g. "Xumo" when no such line was ever created) --
   // don't guess and silently write commission data onto the wrong line;
@@ -144,7 +182,7 @@ export async function renderCommissionReports(container, ctx) {
 
   function statusBadge(status) {
     if (status === "received") return `<span class="badge ok">Received</span>`;
-    if (status === "mismatch") return `<span class="badge error">Mismatch</span>`;
+    if (status === "mismatch") return `<span class="badge error">Commission Mismatch</span>`;
     if (status === "no_report") return `<span class="badge neutral">No Report (manual)</span>`;
     return `<span class="badge warn">Pending</span>`;
   }
@@ -374,6 +412,7 @@ export async function renderCommissionReports(container, ctx) {
         commissionAmount: pr.commissionAmount,
         matchedLineId: candidate ? candidate.id : null,
         matchStatus: candidate ? "matched" : "unmatched",
+        renamedFrom: renamedFromIfTvRename(candidate, pr.commissionProductNameRaw),
       });
     }
   }
@@ -389,7 +428,7 @@ export async function renderCommissionReports(container, ctx) {
     container.innerHTML = `
       <div class="screen">
         <h2>Step 3: Review &amp; Match</h2>
-        <p class="muted">Green = auto-matched and amount agrees. Yellow = mismatched amount (will be saved but flagged). Purple = a negative amount, i.e. a chargeback -- confirming it will NOT overwrite this line's received commission, it's recorded separately and shown on the Chargebacks report. Rows with no match need a manual selection before confirming.</p>
+        <p class="muted">Green = auto-matched and amount agrees. Yellow = "Commission Mismatch" -- the account/product matched fine, only the $ amount differs from what's expected (will be saved but flagged). Purple = a negative amount, i.e. a chargeback -- confirming it will NOT overwrite this line's received commission, it's recorded separately and shown on the Chargebacks report. Rows with no match need a manual selection before confirming. If a TV plan's name changed on the provider's report (e.g. renamed), it's noted under the match and the line's saved name is updated to match on save.</p>
         <div class="btn-row">
           <button class="btn primary" id="confirm-btn">Confirm &amp; Save</button>
           <button class="btn" id="back-to-mapping-btn">Back (Column Mapping)</button>
@@ -422,8 +461,13 @@ export async function renderCommissionReports(container, ctx) {
                   <td>
                     ${
                       line
-                        ? `<span class="badge ${chargeback ? "chargeback" : mismatch ? "error" : "ok"}">${chargeback ? "Chargeback" : mismatch ? "Mismatch" : "Matched"}</span>
-                           <div class="muted">${escapeHtml(lineLabel(line))}</div>`
+                        ? `<span class="badge ${chargeback ? "chargeback" : mismatch ? "error" : "ok"}">${chargeback ? "Chargeback" : mismatch ? "Commission Mismatch" : "Matched"}</span>
+                           <div class="muted">${escapeHtml(lineLabel(line))}</div>
+                           ${
+                             r.renamedFrom
+                               ? `<div class="muted">Product name changed: "${escapeHtml(r.renamedFrom)}" &rarr; "${escapeHtml(r.commissionProductNameRaw)}" (will update on save)</div>`
+                               : ""
+                           }`
                         : `<span class="badge warn">No match</span>`
                     }
                     <select class="r-manual-match">
@@ -454,6 +498,8 @@ export async function renderCommissionReports(container, ctx) {
     r.commissionAmount = amtVal === "" ? null : Number(amtVal);
     r.matchedLineId = tr.querySelector(".r-manual-match").value || null;
     r.matchStatus = r.matchedLineId ? "manual" : "unmatched";
+    const line = r.matchedLineId ? linesForProvider.find((l) => l.id === r.matchedLineId) : null;
+    r.renamedFrom = renamedFromIfTvRename(line, r.commissionProductNameRaw);
   }
 
   function wireReviewEvents() {
@@ -527,15 +573,26 @@ export async function renderCommissionReports(container, ctx) {
         // amount with a negative number). The chargeback itself is still
         // recorded below via commission_report_rows, which is what the
         // Chargebacks report reads from.
+        //
+        // A TV plan rename (renamedFrom set, regardless of chargeback) is a
+        // catalog-identity fix, not a commission event, so it's applied
+        // independently -- it also fixes plan_name going forward so future
+        // reports for this account match on the exact name again instead of
+        // needing the rename fallback in pickCandidate() every time.
+        const updateFields = {};
+        if (r.renamedFrom) updateFields.plan_name = r.commissionProductNameRaw;
         if (!chargeback) {
+          Object.assign(updateFields, {
+            actual_commission_amount: r.commissionAmount,
+            commission_matched_at: new Date().toISOString(),
+            commission_matched_by: ctx.profile.id,
+            status: mismatch ? "mismatch" : "received",
+          });
+        }
+        if (Object.keys(updateFields).length > 0) {
           const { error: updErr } = await supabase
             .from("order_service_lines")
-            .update({
-              actual_commission_amount: r.commissionAmount,
-              commission_matched_at: new Date().toISOString(),
-              commission_matched_by: ctx.profile.id,
-              status: mismatch ? "mismatch" : "received",
-            })
+            .update(updateFields)
             .eq("id", r.matchedLineId);
           if (updErr) throw updErr;
         }
@@ -604,7 +661,7 @@ export async function renderCommissionReports(container, ctx) {
                         <select class="m-status">
                           <option value="pending" ${l.status === "pending" ? "selected" : ""}>Pending</option>
                           <option value="received" ${l.status === "received" ? "selected" : ""}>Received</option>
-                          <option value="mismatch" ${l.status === "mismatch" ? "selected" : ""}>Mismatch</option>
+                          <option value="mismatch" ${l.status === "mismatch" ? "selected" : ""}>Commission Mismatch</option>
                           <option value="no_report" ${l.status === "no_report" ? "selected" : ""}>No Report (manual)</option>
                           <option value="missing" ${l.status === "missing" ? "selected" : ""}>Missing</option>
                         </select>
