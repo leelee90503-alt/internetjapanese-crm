@@ -115,6 +115,7 @@ export async function renderChargebacks(container, ctx) {
             : `<span class="muted">Original line not found (may have been deleted)</span>`
         }</td>
         <td class="muted">${escapeHtml(r.commission_report_batches?.source_filename || "-")}</td>
+        <td><button class="btn small danger" data-delete="${r.id}">Delete</button></td>
       </tr>
     `;
   }
@@ -136,7 +137,9 @@ export async function renderChargebacks(container, ctx) {
           Every commission report row with a negative amount -- a provider clawing back commission already paid
           (e.g. the customer canceled early). Confirming a chargeback on the Commission Report screen does not
           overwrite the customer's original received commission; it's recorded here instead, linked to the customer
-          and product so you can see exactly who and what was charged back.
+          and product so you can see exactly who and what was charged back. If the same commission report is
+          uploaded more than once, the same chargeback can end up recorded twice -- use Delete to remove the extra
+          copy (deleting only removes this record; it never touches the customer's received commission).
         </p>
 
         ${loadError ? `<div class="alert error">Failed to load: ${escapeHtml(loadError)}</div>` : ""}
@@ -161,11 +164,11 @@ export async function renderChargebacks(container, ctx) {
           <thead>
             <tr>
               <th>Date</th><th>Customer</th><th>Account #</th><th>Provider</th><th>Product</th>
-              <th>Chargeback Amount</th><th>Original Commission</th><th>Source File</th>
+              <th>Chargeback Amount</th><th>Original Commission</th><th>Source File</th><th></th>
             </tr>
           </thead>
           <tbody>
-            ${pageRows.map(rowHtml).join("") || `<tr><td colspan="8" class="muted">No chargebacks${filterProvider || filterSearch ? " matching these filters" : ""}.</td></tr>`}
+            ${pageRows.map(rowHtml).join("") || `<tr><td colspan="9" class="muted">No chargebacks${filterProvider || filterSearch ? " matching these filters" : ""}.</td></tr>`}
           </tbody>
         </table>
 
@@ -227,6 +230,24 @@ export async function renderChargebacks(container, ctx) {
         return;
       }
       downloadAsExcel(rowsToExport);
+    });
+
+    container.querySelectorAll("[data-delete]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.delete;
+        const r = rows.find((x) => x.id === id);
+        const label = r ? `${r.line?.orders?.customers?.name || r.customer_name_raw || "-"} -- ${fmtMoney(r.commission_amount)}` : id;
+        if (!confirm(`Delete this chargeback row (${label})? This only removes the chargeback record itself -- it does not change the customer's original received commission.`)) return;
+        btn.disabled = true;
+        const { error } = await supabase.from("commission_report_rows").delete().eq("id", id);
+        if (error) {
+          alert("Failed to delete: " + error.message);
+          btn.disabled = false;
+          return;
+        }
+        await load();
+        draw();
+      });
     });
   }
 
