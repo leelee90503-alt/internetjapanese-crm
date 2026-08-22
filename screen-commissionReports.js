@@ -85,14 +85,47 @@ function mobileLineOrdinal(s) {
   return m ? Number(m[1]) : 1;
 }
 
+// Coarse service category for a plan name / reported product name, used only
+// to sanity-check the "account has exactly one remaining line" shortcut
+// below. Returns null when the text doesn't clearly indicate any category
+// (e.g. blank, or a generic legacy plan_name like plain "Internet"/"Mobile"
+// that doesn't conflict with anything) -- null means "can't rule it out",
+// not "definitely matches".
+function productCategory(s) {
+  const p = normPlan(s);
+  if (!p) return null;
+  if (isTvServiceText(s)) return "tv";
+  if (/xumo/.test(p)) return "xumo";
+  if (isMobileProductText(s)) return "mobile";
+  if (/internet|gig|advantage|premier/.test(p)) return "internet";
+  return null;
+}
+
 // Pick the best unused candidate order_service_line for one report row.
 // `candidates` must already be filtered to lines not yet claimed by an
 // earlier row in this same upload.
 function pickCandidate(candidates, productNameRaw) {
   if (candidates.length === 0) return null;
-  if (candidates.length === 1) return candidates[0];
 
   const product = normPlan(productNameRaw);
+
+  if (candidates.length === 1) {
+    const only = candidates[0];
+    if (!product) return only;
+    // Guard against blindly attaching a report row to an account's one
+    // remaining line when the two are obviously different kinds of service
+    // (e.g. a "Mobile Line 1" report row landing on an account whose only
+    // line on file is "Premier" internet -- that's not a $ mismatch on the
+    // same service, it's a missing Mobile line for this account). Only
+    // auto-match when neither side has a recognizable, conflicting
+    // category -- a generic/legacy plan_name (category unknown) still
+    // matches as before.
+    const prodCat = productCategory(product);
+    const planCat = productCategory(only.plan_name);
+    if (!prodCat || !planCat || prodCat === planCat) return only;
+    return null;
+  }
+
   if (!product) {
     // No product name given (or that column wasn't mapped) -- multiple
     // candidates can't be told apart, so fall back to the pre-Part-B
