@@ -192,6 +192,8 @@ export async function renderCommissionReports(container, ctx) {
   let mapping = {};
   let reportRows = [];
   let linesForProvider = [];
+  let services = [];
+  let commissionRatesForProvider = [];
   let busyMsg = "";
 
   // ---- manual search/correction tool state ----
@@ -385,19 +387,30 @@ export async function renderCommissionReports(container, ctx) {
   }
 
   async function buildRows() {
-    const { data: lines, error } = await supabase
-      .from("order_service_lines")
-      .select(
-        "id, account_number, plan_name, expected_commission, status, created_at, orders(order_date, customers(name, phone))"
-      )
-      .eq("provider_id", selectedProviderId)
-      .order("created_at", { ascending: true });
+    const [linesResult, servicesResult, ratesResult] = await Promise.all([
+      supabase
+        .from("order_service_lines")
+        .select(
+          "id, account_number, plan_name, expected_commission, status, created_at, orders(order_date, customers(name, phone))"
+        )
+        .eq("provider_id", selectedProviderId)
+        .order("created_at", { ascending: true }),
+      supabase.from("services").select("id, name"),
+      supabase
+        .from("commission_rates")
+        .select("provider_id, plan_name, rate")
+        .eq("provider_id", selectedProviderId)
+        .eq("is_active", true),
+    ]);
+    const { data: lines, error } = linesResult;
     if (error) {
       alert("Failed to load existing orders for matching: " + error.message);
       linesForProvider = [];
     } else {
       linesForProvider = lines || [];
     }
+    services = servicesResult.data || [];
+    commissionRatesForProvider = ratesResult.data || [];
 
     const linesByAccount = {};
     linesForProvider.forEach((l) => {
@@ -446,8 +459,157 @@ export async function renderCommissionReports(container, ctx) {
         matchedLineId: candidate ? candidate.id : null,
         matchStatus: candidate ? "matched" : "unmatched",
         renamedFrom: renamedFromIfTvRename(candidate, pr.commissionProductNameRaw),
+        // ---- "create a new service line for this row" UI state (transient,
+        // not persisted -- see startCreateLine()/createLineForRow() below) ----
+        createUi: null, // null | "picking" | "none-found"
+        createOptions: [],
+        createMessage: "",
+        createBusy: false,
       });
     }
+  }
+
+  // Look up an existing services catalog row by name (case-insensitive), or
+  // create one -- mirrors the same helper in screen-customerUpload.js, since
+  // order_service_lines requires a service_id. Kept local to this screen
+  // (its own `services` cache) rather than shared, to avoid coupling the two
+  // upload flows together.
+  async function getOrCreateServiceId(rawName) {
+    const name = (rawName || "").trim();
+    if (!name) return null;
+    const existing = services.find((s) => s.name.trim().toLowerCase() === name.toLowerCase());
+    if (existing) return existing.id;
+    const { data: newSvc, error } = await supabase.from("services").insert({ name }).select().single();
+    if (error) {
+      const { data: retryData } = await supabase.from("services").select("id, name").ilike("name", name);
+      const retryMatch = (retryData || []).find((s) => s.name.trim().toLowerCase() === name.toLowerCase());
+      return retryMatch ? retryMatch.id : null;
+    }
+    services.push(newSvc);
+    return newSvc.id;
+  }
+
+  function lookupCommissionRate(planName) {
+    if (!selectedProviderId || !planName) return null;
+    const target = String(planName).trim().toLowerCase();
+    if (!target) return null;
+    const match = commissionRatesForProvider.find((r) => String(r.plan_name).trim().toLowerCase() === target);
+    return match ? Number(match.rate) : null;
+  }
+
+  // "No match" rows mean this account/product simply has no order_service_line
+  // on file yet -- not necessarily that the customer doesn't have it (the
+  // report itself is usually the best evidence it exists). Rather than making
+  // the admin bounce to the Customer/Order screen, this creates the missing
+  // line directly and matches this row to it:
+  //  1) If the account number already has ANY other line on file (common
+  //     case -- e.g. TV/Internet exist but this Mobile line doesn't), attach
+  //     the new line to that same order automatically -- no extra input.
+  //  2) Otherwise the account number is entirely new to the system, so there's
+  //     no order to anchor to by account number alone -- fall back to a fuzzy
+  //     search by the report's customer name and let the admin confirm which
+  //     customer/order this belongs to (name-only matching is far less
+  //     certain than an account number, so this step always asks first --
+  //     see the Hideaki/Tatsuki Kikuchi near-miss this was built to avoid).
+  async function startCreateLine(r) {
+    r.createBusy = true;
+    r.createUi = null;
+    r.createMessage = "";
+    drawReviewStep();
+
+    if (r.accountNumber) {
+      const { data: existingByAcct, error: acctErr } = await supabase
+        .from("order_service_lines")
+        .select("order_id")
+        .eq("account_number", r.accountNumber)
+        .limit(1);
+      if (acctErr) {
+        r.createBusy = false;
+        r.createUi = "none-found";
+        r.createMessage = "Lookup failed: " + acctErr.message;
+        drawReviewStep();
+        return;
+      }
+      if (existingByAcct && existingByAcct.length > 0) {
+        await createLineForRow(r, existingByAcct[0].order_id);
+        return;
+      }
+    }
+
+    const name = (r.customerNameRaw || "").trim();
+    if (!name) {
+      r.createBusy = false;
+      r.createUi = "none-found";
+      r.createMessage =
+        "No existing line for this account number, and no customer name in the report to search by. Please add this line manually via the Customer/Order screen.";
+      drawReviewStep();
+      return;
+    }
+
+    const { data: custs, error: custErr } = await supabase
+      .from("customers")
+      .select("id, name, phone, orders(id, order_date)")
+      .ilike("name", `%${name}%`);
+    if (custErr) {
+      r.createBusy = false;
+      r.createUi = "none-found";
+      r.createMessage = "Customer search failed: " + custErr.message;
+      drawReviewStep();
+      return;
+    }
+    const options = [];
+    (custs || []).forEach((c) => {
+      (c.orders || []).forEach((o) => {
+        options.push({ customerId: c.id, customerName: c.name, phone: c.phone, orderId: o.id, orderDate: o.order_date });
+      });
+    });
+    r.createBusy = false;
+    if (options.length === 0) {
+      r.createUi = "none-found";
+      r.createMessage = `No matching customer/order found for "${name}" in the system. Please add this customer via Customer Excel Upload or the Customer/Order screen first.`;
+    } else {
+      r.createUi = "picking";
+      r.createOptions = options;
+    }
+    drawReviewStep();
+  }
+
+  async function createLineForRow(r, orderId) {
+    r.createBusy = true;
+    drawReviewStep();
+    try {
+      const serviceId = await getOrCreateServiceId(r.commissionProductNameRaw);
+      const expectedCommission = lookupCommissionRate(r.commissionProductNameRaw);
+      const { data: newLine, error } = await supabase
+        .from("order_service_lines")
+        .insert({
+          order_id: orderId,
+          service_id: serviceId,
+          provider_id: selectedProviderId,
+          plan_name: r.commissionProductNameRaw || null,
+          account_number: r.accountNumber || null,
+          expected_commission: expectedCommission,
+          status: "pending",
+        })
+        .select(
+          "id, account_number, plan_name, expected_commission, status, created_at, orders(order_date, customers(name, phone))"
+        )
+        .single();
+      if (error) throw error;
+      linesForProvider.push(newLine);
+      r.matchedLineId = newLine.id;
+      r.matchStatus = "created";
+      r.renamedFrom = null;
+      r.createUi = null;
+      r.createOptions = [];
+      r.createMessage = "";
+      r.createBusy = false;
+    } catch (err) {
+      r.createBusy = false;
+      r.createUi = "none-found";
+      r.createMessage = "Failed to create service line: " + (err.message || err);
+    }
+    drawReviewStep();
   }
 
   function lineLabel(line) {
@@ -456,12 +618,43 @@ export async function renderCommissionReports(container, ctx) {
     return `${cust?.name || "(no name)"}${plan} - ${fmtMoney(line.expected_commission)} (acct: ${line.account_number || "-"})`;
   }
 
+  // Renders the "+ Create new service line" affordance shown under a
+  // "No match" badge -- see startCreateLine()/createLineForRow() above for
+  // the logic. Three states: nothing yet (a single button), "picking" (found
+  // no exact account-number match, so ask the admin to confirm which
+  // customer/order this belongs to via a fuzzy name-search dropdown), or
+  // "none-found" (no candidates at all, or the create itself failed).
+  function createLineUiHtml(r) {
+    if (r.createUi === "picking") {
+      return `
+        <div class="muted" style="margin-top:4px">No existing line for this account #. Confirm which customer/order this belongs to:</div>
+        <select class="r-create-select">
+          ${r.createOptions
+            .map(
+              (o) =>
+                `<option value="${o.orderId}">${escapeHtml(o.customerName)}${o.phone ? " (" + escapeHtml(o.phone) + ")" : ""} - order ${escapeHtml(o.orderDate || "?")}</option>`
+            )
+            .join("")}
+        </select>
+        <button class="btn small r-create-confirm" ${r.createBusy ? "disabled" : ""}>${r.createBusy ? "Creating..." : "Create &amp; Match"}</button>
+        <button class="btn small r-create-cancel" ${r.createBusy ? "disabled" : ""}>Cancel</button>
+      `;
+    }
+    if (r.createUi === "none-found") {
+      return `
+        <div class="alert info" style="margin:4px 0">${escapeHtml(r.createMessage || "")}</div>
+        <button class="btn small r-create-start" ${r.createBusy ? "disabled" : ""}>${r.createBusy ? "Looking up..." : "Try again"}</button>
+      `;
+    }
+    return `<div style="margin-top:4px"><button class="btn small r-create-start" ${r.createBusy ? "disabled" : ""}>${r.createBusy ? "Looking up..." : "+ Create new service line"}</button></div>`;
+  }
+
   function drawReviewStep() {
     const usedLineIds = new Set(reportRows.filter((r) => !r.excluded).map((r) => r.matchedLineId).filter(Boolean));
     container.innerHTML = `
       <div class="screen">
         <h2>Step 3: Review &amp; Match</h2>
-        <p class="muted">Green = auto-matched and amount agrees. Yellow = "Commission Mismatch" -- the account/product matched fine, only the $ amount differs from what's expected (will be saved but flagged). Purple = a negative amount, i.e. a chargeback -- confirming it will NOT overwrite this line's received commission, it's recorded separately and shown on the Chargebacks report. Rows with no match need a manual selection before confirming. If a TV plan's name changed on the provider's report (e.g. renamed), it's noted under the match and the line's saved name is updated to match on save.</p>
+        <p class="muted">Green = auto-matched and amount agrees. Yellow = "Commission Mismatch" -- the account/product matched fine, only the $ amount differs from what's expected (will be saved but flagged). Purple = a negative amount, i.e. a chargeback -- confirming it will NOT overwrite this line's received commission, it's recorded separately and shown on the Chargebacks report. Rows with no match need a manual selection before confirming -- or, if this account/product genuinely has no line on file yet, use "+ Create new service line" to add it and match this row in one step. If a TV plan's name changed on the provider's report (e.g. renamed), it's noted under the match and the line's saved name is updated to match on save.</p>
         <div class="btn-row">
           <button class="btn primary" id="confirm-btn">Confirm &amp; Save</button>
           <button class="btn" id="back-to-mapping-btn">Back (Column Mapping)</button>
@@ -501,7 +694,7 @@ export async function renderCommissionReports(container, ctx) {
                                ? `<div class="muted">Product name changed: "${escapeHtml(r.renamedFrom)}" &rarr; "${escapeHtml(r.commissionProductNameRaw)}" (will update on save)</div>`
                                : ""
                            }`
-                        : `<span class="badge warn">No match</span>`
+                        : `<span class="badge warn">No match</span>${createLineUiHtml(r)}`
                     }
                     <select class="r-manual-match">
                       <option value="">(No selection)</option>
@@ -545,6 +738,21 @@ export async function renderCommissionReports(container, ctx) {
       tr.querySelector(".r-manual-match").addEventListener("change", () => {
         readRowFromTr(tr, r);
         drawReviewStep();
+      });
+      tr.querySelector(".r-create-start")?.addEventListener("click", async () => {
+        await startCreateLine(r);
+      });
+      tr.querySelector(".r-create-cancel")?.addEventListener("click", () => {
+        r.createUi = null;
+        r.createOptions = [];
+        r.createMessage = "";
+        drawReviewStep();
+      });
+      tr.querySelector(".r-create-confirm")?.addEventListener("click", async () => {
+        const sel = tr.querySelector(".r-create-select");
+        const orderId = sel ? sel.value : null;
+        if (!orderId) return;
+        await createLineForRow(r, orderId);
       });
     });
     container.querySelector("#confirm-btn").addEventListener("click", async () => {
