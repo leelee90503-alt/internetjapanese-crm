@@ -105,7 +105,7 @@ export async function renderPendingCommission(container, ctx) {
     const { data, error } = await supabase
       .from("order_service_lines")
       .select(
-        "id, account_number, plan_name, expected_commission, order_id, providers(name), orders(order_date, order_number, customers(name))"
+        "id, account_number, plan_name, expected_commission, order_id, providers(name), orders(order_date, order_number, customers(name, address))"
       )
       .eq("status", "pending")
       .order("order_id", { ascending: true })
@@ -268,7 +268,8 @@ export async function renderPendingCommission(container, ctx) {
               <div>
                 <strong>Expected commission:</strong> ${fmtMoney(line.expected_commission)}<br/>
                 <strong>Account #:</strong> ${escapeHtml(line.account_number || "-")}<br/>
-                <strong>Customer:</strong> ${escapeHtml(line.orders?.customers?.name || "-")}
+                <strong>Customer:</strong> ${escapeHtml(line.orders?.customers?.name || "-")}<br/>
+                <strong>Address:</strong> ${escapeHtml(line.orders?.customers?.address || "-")}
               </div>
             </div>
 
