@@ -7,7 +7,7 @@ import { escapeHtml, fmtMoney, normalizeAccountNumber, normalizePhone } from "./
 // line to see the expected commission + ordered service, a live lookup of
 // the uploaded commission report for that account number (so they can see
 // whether this customer already showed up in a report and, if so, why it
-// didn't auto-match), a free-text note, and a 4-way decision:
+// didn't auto-match), a free-text note, and a 5-way decision:
 //   - Keep Pending    -> no status change, just save the note
 //   - Mark Received   -> status='received', copies expected_commission into
 //                        actual_commission_amount (same effect as a normal match)
@@ -25,20 +25,26 @@ import { escapeHtml, fmtMoney, normalizeAccountNumber, normalizePhone } from "./
 //                        now 'received'). This never touches the sibling's
 //                        received amount -- it only stops double-counting this
 //                        duplicate row as still-outstanding commission.
+//   - Order Canceled  -> status='canceled' -- for a customer who canceled the
+//                        order before any commission was ever paid. No amount
+//                        is recorded; this just stops the line from showing up
+//                        as outstanding on Pending or Missing Commission while
+//                        keeping the row (and its history) for the record.
 //
 // This replaces the old "Flag as Missing" button, which used to create a
 // missing_commission_items row -- that table is now legacy-only.
 //
-// Duplicate detection: on expand, each line is checked two independent ways
-// (either is enough to surface a warning, since legacy-import rows are
-// inconsistent about which fields survived intact) -- see
-// lookupPossibleDuplicate() below:
-//   1. Same name + phone on a different customer record (the same heuristic
-//      duplicateCheck.js already uses on new uploads).
-//   2. A near-identical account number (Levenshtein distance, or one number
-//      containing the other) on the same provider with a nearby order date --
-//      catches rows where the legacy import also mangled/reordered the name
-//      or dropped the phone number, so signal 1 alone would miss them.
+// Duplicate detection: on expand, each line is checked for a possible
+// duplicate customer record -- see lookupPossibleDuplicate() below. It looks
+// for another customer record (different id) whose name is the same set of
+// words (order-independent, small-spelling-difference-tolerant -- legacy
+// import rows are inconsistent about name order and occasionally have a
+// typo) and, when both sides have a phone on file, whose phone also matches.
+// An earlier version of this check also tried flagging "near-identical"
+// account numbers on a nearby order date, but Spectrum's account numbers
+// turned out to be assigned close together for unrelated customers too --
+// that check produced false positives at the same edit distance as real
+// duplicates, so it was dropped in favor of the name-based signal above.
 
 const PAGE_SIZE = 50;
 
@@ -505,6 +511,7 @@ export async function renderPendingCommission(container, ctx) {
               <button class="btn small" data-decide="${line.id}:keep_pending" ${busy ? "disabled" : ""}>Keep Pending</button>
               <button class="btn small primary" data-decide="${line.id}:received" ${busy ? "disabled" : ""}>Mark Received</button>
               <button class="btn small danger" data-decide="${line.id}:missing" ${busy ? "disabled" : ""}>Confirmed Missing</button>
+              <button class="btn small danger" data-decide="${line.id}:canceled" ${busy ? "disabled" : ""}>Order Canceled</button>
             </div>
           </div>
         </td>
@@ -554,10 +561,11 @@ export async function renderPendingCommission(container, ctx) {
           All order lines currently waiting on a commission report, except lines already tracked on the Missing
           Commission screen -- review those there instead. Click a row for full detail -- expected commission,
           ordered service, a live lookup of any commission report already uploaded for that account, and a check for
-          another customer record (same name + phone) that already has this same commission recorded -- then choose
-          Keep Pending, Mark Received, Confirmed Missing, or (when a duplicate customer record is found) Mark as
-          Duplicate. Only "Confirmed Missing" sends a line to the Missing Commission follow-up list; the "21+ days"
-          badge below is just a visual warning, nothing moves automatically.
+          another customer record (same name, allowing for word order/spelling) that already has this same
+          commission recorded -- then choose Keep Pending, Mark Received, Confirmed Missing, Order Canceled, or (when
+          a duplicate customer record is found) Mark as Duplicate. Only "Confirmed Missing" sends a line to the
+          Missing Commission follow-up list; "Order Canceled" is for a customer who canceled before any commission
+          was paid; the "21+ days" badge below is just a visual warning, nothing moves automatically.
         </p>
 
         ${loadError ? `<div class="alert error">Failed to load: ${escapeHtml(loadError)}</div>` : ""}
@@ -777,6 +785,32 @@ export async function renderPendingCommission(container, ctx) {
             .eq("id", id);
           busy = false;
           if (error) alert("Failed to confirm missing: " + error.message);
+          expandedId = null;
+          await load();
+          draw();
+          return;
+        }
+
+        if (choice === "canceled") {
+          if (
+            !confirm(
+              `Mark "${line.orders?.customers?.name || "this line"}" - ${line.plan_name || ""} as canceled (customer canceled before any commission was received)? This removes it from Pending/Missing Commission -- no amount is recorded.`
+            )
+          )
+            return;
+          busy = true;
+          draw();
+          const { error } = await supabase
+            .from("order_service_lines")
+            .update({
+              status: "canceled",
+              resolution_note: note,
+              resolution_at: new Date().toISOString(),
+              resolution_by: ctx.profile?.id || null,
+            })
+            .eq("id", id);
+          busy = false;
+          if (error) alert("Failed to mark canceled: " + error.message);
           expandedId = null;
           await load();
           draw();

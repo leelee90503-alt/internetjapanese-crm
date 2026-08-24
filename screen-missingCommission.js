@@ -149,6 +149,7 @@ export async function renderMissingCommission(container, ctx) {
         <td>
           <button class="btn small" data-back-to-pending="${l.id}" ${busy ? "disabled" : ""}>Back to Pending</button>
           <button class="btn small primary" data-mark-received="${l.id}" ${busy ? "disabled" : ""}>Mark Received</button>
+          <button class="btn small danger" data-mark-canceled="${l.id}" ${busy ? "disabled" : ""}>Order Canceled</button>
         </td>
       </tr>
     `;
@@ -196,7 +197,9 @@ export async function renderMissingCommission(container, ctx) {
         <p class="muted">
           Orders staff have explicitly confirmed as missing commission -- these need direct follow-up with the provider,
           they are not just "still waiting". To confirm a still-pending order as missing (or to change your mind), use
-          the "Confirmed Missing" decision on the Pending Commission screen.
+          the "Confirmed Missing" decision on the Pending Commission screen. If the customer canceled the order before
+          any commission was ever paid, use "Order Canceled" here to remove it from tracking -- unlike "Mark Received",
+          it does not record any amount.
         </p>
 
         ${loadError ? `<div class="alert error">Failed to load: ${escapeHtml(loadError)}</div>` : ""}
@@ -331,6 +334,35 @@ export async function renderMissingCommission(container, ctx) {
           .eq("id", id);
         busy = false;
         if (error) alert("Failed to mark received: " + error.message);
+        await load();
+        draw();
+      });
+    });
+
+    container.querySelectorAll("[data-mark-canceled]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const id = btn.dataset.markCanceled;
+        const line = lines.find((l) => l.id === id);
+        if (!line) return;
+        if (
+          !confirm(
+            `Mark "${line.orders?.customers?.name || "this line"}" - ${line.plan_name || ""} as canceled (customer canceled before any commission was received)? This removes it from Missing Commission -- no amount is recorded.`
+          )
+        )
+          return;
+        busy = true;
+        draw();
+        const { error } = await supabase
+          .from("order_service_lines")
+          .update({
+            status: "canceled",
+            resolution_note: line.resolution_note,
+            resolution_at: new Date().toISOString(),
+            resolution_by: ctx.profile?.id || null,
+          })
+          .eq("id", id);
+        busy = false;
+        if (error) alert("Failed to mark canceled: " + error.message);
         await load();
         draw();
       });

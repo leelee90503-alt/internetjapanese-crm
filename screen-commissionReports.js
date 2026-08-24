@@ -220,6 +220,7 @@ export async function renderCommissionReports(container, ctx) {
     if (status === "mismatch") return `<span class="badge error">Commission Mismatch</span>`;
     if (status === "no_report") return `<span class="badge neutral">No Report (manual)</span>`;
     if (status === "duplicate") return `<span class="badge neutral">Duplicate</span>`;
+    if (status === "canceled") return `<span class="badge neutral">Canceled</span>`;
     return `<span class="badge warn">Pending</span>`;
   }
 
@@ -907,6 +908,7 @@ export async function renderCommissionReports(container, ctx) {
                           <option value="no_report" ${l.status === "no_report" ? "selected" : ""}>No Report (manual)</option>
                           <option value="missing" ${l.status === "missing" ? "selected" : ""}>Missing</option>
                           <option value="duplicate" ${l.status === "duplicate" ? "selected" : ""}>Duplicate</option>
+                          <option value="canceled" ${l.status === "canceled" ? "selected" : ""}>Canceled</option>
                         </select>
                       </td>
                       <td><button class="btn small m-save">Save</button></td>
