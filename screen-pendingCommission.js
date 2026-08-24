@@ -174,28 +174,84 @@ export async function renderPendingCommission(container, ctx) {
       .sort();
   }
 
-  function sameTokenSet(a, b) {
+  // Plain Levenshtein edit distance, used only for short per-token spelling
+  // comparisons below (e.g. "jakie" vs "jackie") -- NOT for anything longer
+  // like account numbers, where a loose distance threshold turned out to
+  // match unrelated values just as easily as real typos (see the comment on
+  // lookupPossibleDuplicate below).
+  function levenshtein(a, b) {
+    const m = a.length,
+      n = b.length;
+    if (m === 0) return n;
+    if (n === 0) return m;
+    const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+    for (let i = 0; i <= m; i++) dp[i][0] = i;
+    for (let j = 0; j <= n; j++) dp[0][j] = j;
+    for (let i = 1; i <= m; i++) {
+      for (let j = 1; j <= n; j++) {
+        dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      }
+    }
+    return dp[m][n];
+  }
+
+  function tokenClose(t1, t2) {
+    if (t1 === t2) return true;
+    const maxLen = Math.max(t1.length, t2.length);
+    if (maxLen < 3) return false; // too short to fuzzy-match safely (e.g. initials)
+    const dist = levenshtein(t1, t2);
+    return dist <= (maxLen <= 5 ? 1 : 2);
+  }
+
+  // Same set of name words in any order, allowing a small per-word spelling
+  // difference (handles "Jakie"/"Jackie", "Gomez"/"Gmez"-type legacy typos
+  // on top of the word-order problem nameTokens() alone doesn't fix).
+  function tokensRoughlyMatch(a, b) {
     if (a.length === 0 || b.length !== a.length) return false;
-    return a.every((t, i) => t === b[i]);
+    return a.every((t, i) => tokenClose(t, b[i]));
+  }
+
+  // Only reject on phone: if BOTH sides have a phone number on file, they
+  // must match. If either side has none -- common for "[Legacy import]"
+  // rows -- phone isn't used to rule the pair out.
+  function phoneCompatible(p1, p2) {
+    const a = normalizePhone(p1),
+      b = normalizePhone(p2);
+    if (a && b) return a === b;
+    return true;
+  }
+
+  // All customers, loaded once per screen visit and reused across every
+  // lookupPossibleDuplicate() call -- the fuzzy, word-order-independent name
+  // match below can't be expressed as a single ilike filter, so instead of
+  // re-querying per line this pulls the (small, low-thousands) customers
+  // table once and matches client-side.
+  let allCustomersPromise = null;
+  function loadAllCustomers() {
+    if (!allCustomersPromise) {
+      allCustomersPromise = supabase.from("customers").select("id, name, phone").limit(20000);
+    }
+    return allCustomersPromise;
   }
 
   // Looks for another order_service_lines row that is very likely the same
   // real customer's already-processed commission, using a name match that
-  // ignores word order and requires an exact phone match when both sides
-  // have a phone on file:
+  // ignores word order and tolerates a small per-word spelling difference,
+  // combined with a phone cross-check:
   //
-  //   - Same set of name words, in any order, on a DIFFERENT customer
-  //     record -- catches legacy-import rows recorded "LASTNAME FIRSTNAME"
-  //     against the real order recorded "Firstname Lastname" (or vice
-  //     versa), which a plain string/ilike comparison misses entirely.
-  //   - If BOTH customer records have a phone number, it must match too
-  //     (this is the same signal duplicateCheck.js already uses on new
-  //     uploads). If either side has no phone on file -- common for
-  //     "[Legacy import]" rows -- the name-token match alone is used; a
-  //     shared name is still a strong enough signal to warrant a look,
-  //     given the account number and product/date are shown right there
-  //     for the admin to visually confirm before clicking "Mark as
-  //     Duplicate".
+  //   - Same set of name words (order-independent, small-typo-tolerant) on a
+  //     DIFFERENT customer record -- catches legacy-import rows recorded
+  //     "LASTNAME FIRSTNAME" against the real order's "Firstname Lastname"
+  //     (or vice versa), and/or with a one-letter spelling slip ("Jakie" vs
+  //     "Jackie"), neither of which a plain string/ilike comparison catches.
+  //   - If BOTH customer records have a phone number on file, it must match
+  //     too (this is the same signal duplicateCheck.js already uses on new
+  //     uploads) -- this is what keeps the fuzzy name match safe: tried
+  //     against the full customer list, name-only fuzzy matching alone
+  //     turned up a handful of clearly-different people with coincidentally
+  //     similar names (different phone numbers), which the phone check
+  //     filters back out. If either side has no phone on file, the
+  //     name-token match alone is used.
   //
   // (An earlier version of this check also tried flagging "near-identical"
   // account numbers on a nearby order date, but Spectrum's account numbers
@@ -217,15 +273,7 @@ export async function renderPendingCommission(container, ctx) {
       return result;
     }
 
-    // Narrow the customers scan with an ilike on the shortest word (cheapest
-    // to be selective enough), then confirm the full token set client-side --
-    // Postgres ilike can't do "same words in either order" on its own.
-    const shortestToken = myTokens.reduce((a, b) => (b.length < a.length ? b : a));
-    const { data: candidates, error: custErr } = await supabase
-      .from("customers")
-      .select("id, name, phone")
-      .ilike("name", `%${shortestToken}%`)
-      .limit(50);
+    const { data: candidates, error: custErr } = await loadAllCustomers();
     if (custErr) {
       const result = { status: "error", matches: [], error: custErr.message };
       duplicateLookupCache.set(cacheKey, result);
@@ -233,13 +281,7 @@ export async function renderPendingCommission(container, ctx) {
     }
 
     const otherCustomerIds = (candidates || [])
-      .filter((c) => c.id !== myCustomerId && sameTokenSet(myTokens, nameTokens(c.name)))
-      .filter((c) => {
-        const cPhone = normalizePhone(c.phone);
-        // Require a phone match only when both sides actually have one on file.
-        if (myPhone && cPhone) return myPhone === cPhone;
-        return true;
-      })
+      .filter((c) => c.id !== myCustomerId && tokensRoughlyMatch(myTokens, nameTokens(c.name)) && phoneCompatible(myPhone, c.phone))
       .map((c) => c.id);
 
     if (otherCustomerIds.length === 0) {
@@ -264,7 +306,9 @@ export async function renderPendingCommission(container, ctx) {
 
     const matches = (siblingLines || []).map((m) => {
       const cPhone = normalizePhone(m.orders?.customers?.phone);
-      const reason = myPhone && cPhone ? "Same name (any word order) + phone" : "Same name (any word order), no phone on file to cross-check";
+      const exactName = nameTokens(m.orders?.customers?.name).join(" ") === myTokens.join(" ");
+      const namePart = exactName ? "Same name (any word order)" : "Similar name (spelling/word order)";
+      const reason = myPhone && cPhone ? `${namePart} + phone` : `${namePart}, no phone on file to cross-check`;
       return { ...m, matchReason: reason };
     });
 
