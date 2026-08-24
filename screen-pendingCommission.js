@@ -1,13 +1,13 @@
 import { supabase } from "./supabaseClient.js";
 import * as XLSX from "xlsx";
-import { escapeHtml, fmtMoney, normalizeAccountNumber } from "./normalize.js";
+import { escapeHtml, fmtMoney, normalizeAccountNumber, normalizePhone } from "./normalize.js";
 
 // Pending Commission: shows ALL order_service_lines currently in
 // status='pending', with a full detail view per line. Staff can expand any
 // line to see the expected commission + ordered service, a live lookup of
 // the uploaded commission report for that account number (so they can see
 // whether this customer already showed up in a report and, if so, why it
-// didn't auto-match), a free-text note, and a 3-way decision:
+// didn't auto-match), a free-text note, and a 4-way decision:
 //   - Keep Pending    -> no status change, just save the note
 //   - Mark Received   -> status='received', copies expected_commission into
 //                        actual_commission_amount (same effect as a normal match)
@@ -16,9 +16,24 @@ import { escapeHtml, fmtMoney, normalizeAccountNumber } from "./normalize.js";
 //                        automatic 21-day promotion anymore; lines just get
 //                        an "21+ days" warning badge here so staff can see it
 //                        and decide for themselves.
+//   - Mark as Duplicate -> status='duplicate' -- for a pending line that turns
+//                        out to be a second, accidental order_service_lines row
+//                        for the same real customer + service (most often a
+//                        "[Legacy import]" row whose account number is a typo/
+//                        garbled variant of the account number on a sibling
+//                        order that already matched a commission report and is
+//                        now 'received'). This never touches the sibling's
+//                        received amount -- it only stops double-counting this
+//                        duplicate row as still-outstanding commission.
 //
 // This replaces the old "Flag as Missing" button, which used to create a
 // missing_commission_items row -- that table is now legacy-only.
+//
+// Duplicate-customer detection: on expand, each line is also checked against
+// other customer records sharing the same phone number (the same heuristic
+// duplicateCheck.js already uses on new uploads) to proactively surface the
+// "this customer already has a received line under a different, mismatched
+// account number" pattern -- see checkPossibleDuplicate() below.
 
 const PAGE_SIZE = 50;
 
@@ -86,6 +101,10 @@ export async function renderPendingCommission(container, ctx) {
   // Values: { status: 'loading' | 'done' | 'error', rows: [...], error?: string }
   const reportLookupCache = new Map();
 
+  // possible-duplicate-customer lookup cache, keyed by order_service_lines.id.
+  // Values: { status: 'loading' | 'done' | 'error', matches: [...], error?: string }
+  const duplicateLookupCache = new Map();
+
   async function load() {
     const { data: providerRows } = await supabase.from("providers").select("id, name").order("name");
     providers = providerRows || [];
@@ -105,7 +124,7 @@ export async function renderPendingCommission(container, ctx) {
     const { data, error } = await supabase
       .from("order_service_lines")
       .select(
-        "id, account_number, plan_name, expected_commission, order_id, providers(name), orders(order_date, order_number, customers(name, address))"
+        "id, account_number, plan_name, expected_commission, order_id, providers(name), orders(order_date, order_number, customer_id, customers(name, address, phone))"
       )
       .eq("status", "pending")
       .order("order_id", { ascending: true })
@@ -134,6 +153,74 @@ export async function renderPendingCommission(container, ctx) {
 
     const result = error ? { status: "error", rows: [], error: error.message } : { status: "done", rows: data || [] };
     reportLookupCache.set(key, result);
+    return result;
+  }
+
+  // Looks for OTHER customer records (different customer id) sharing this
+  // line's phone number, and if found, pulls any of their order_service_lines
+  // that are NOT still pending -- i.e. already received/mismatch/no_report.
+  // This is the same "name+phone match" signal duplicateCheck.js already uses
+  // to warn about possible duplicates during new customer uploads; here it
+  // runs retroactively against already-pending lines so a leftover duplicate
+  // (most commonly a "[Legacy import]" row with a garbled account number)
+  // gets surfaced instead of sitting in Pending Commission forever.
+  async function lookupPossibleDuplicate(line) {
+    const cacheKey = line.id;
+    if (duplicateLookupCache.has(cacheKey)) return duplicateLookupCache.get(cacheKey);
+
+    const phone = normalizePhone(line.orders?.customers?.phone);
+    const name = line.orders?.customers?.name;
+    const myCustomerId = line.orders?.customer_id;
+    if (!phone || !name || !myCustomerId) {
+      const result = { status: "done", matches: [] };
+      duplicateLookupCache.set(cacheKey, result);
+      return result;
+    }
+
+    duplicateLookupCache.set(cacheKey, { status: "loading", matches: [] });
+
+    // Narrow the customers scan by name (ilike) rather than pulling the whole
+    // table, then confirm the phone match client-side after normalizing --
+    // phone formatting varies row to row (dashes, spaces, none).
+    const { data: sameNameCustomers, error: custErr } = await supabase
+      .from("customers")
+      .select("id, name, phone")
+      .ilike("name", name.trim())
+      .limit(20);
+
+    if (custErr) {
+      const result = { status: "error", matches: [], error: custErr.message };
+      duplicateLookupCache.set(cacheKey, result);
+      return result;
+    }
+
+    const otherCustomerIds = (sameNameCustomers || [])
+      .filter((c) => c.id !== myCustomerId && normalizePhone(c.phone) === phone)
+      .map((c) => c.id);
+
+    if (otherCustomerIds.length === 0) {
+      const result = { status: "done", matches: [] };
+      duplicateLookupCache.set(cacheKey, result);
+      return result;
+    }
+
+    const { data: siblingLines, error: lineErr } = await supabase
+      .from("order_service_lines")
+      .select(
+        "id, account_number, plan_name, status, actual_commission_amount, orders!inner(order_date, customer_id, customers(name, phone))"
+      )
+      .in("orders.customer_id", otherCustomerIds)
+      .neq("status", "pending")
+      .neq("status", "duplicate");
+
+    if (lineErr) {
+      const result = { status: "error", matches: [], error: lineErr.message };
+      duplicateLookupCache.set(cacheKey, result);
+      return result;
+    }
+
+    const result = { status: "done", matches: siblingLines || [] };
+    duplicateLookupCache.set(cacheKey, result);
     return result;
   }
 
@@ -251,6 +338,45 @@ export async function renderPendingCommission(container, ctx) {
     `;
   }
 
+  function duplicateLookupHtml(line) {
+    const cached = duplicateLookupCache.get(line.id);
+    if (!cached || cached.status === "loading") {
+      return "";
+    }
+    if (cached.status === "error") {
+      return `<p class="alert error">Failed to check for duplicate customer records: ${escapeHtml(cached.error)}</p>`;
+    }
+    if (cached.matches.length === 0) {
+      return "";
+    }
+    return `
+      <div class="alert warn">
+        <strong>Possible duplicate:</strong> another customer record with the same name + phone number
+        (${escapeHtml(line.orders?.customers?.name || "-")}, ${escapeHtml(line.orders?.customers?.phone || "-")})
+        already has commission recorded below. If this is the same real order, use "Mark as Duplicate" instead of
+        chasing the provider for a commission that was already paid.
+      </div>
+      <table class="data-table small">
+        <thead><tr><th>Account #</th><th>Plan</th><th>Status</th><th>Amount</th><th>Order Date</th><th></th></tr></thead>
+        <tbody>
+          ${cached.matches
+            .map(
+              (m) => `
+            <tr>
+              <td>${escapeHtml(m.account_number || "-")}</td>
+              <td>${escapeHtml(m.plan_name || "-")}</td>
+              <td>${escapeHtml(m.status || "-")}</td>
+              <td>${fmtMoney(m.actual_commission_amount)}</td>
+              <td>${escapeHtml(m.orders?.order_date || "-")}</td>
+              <td><button class="btn small danger" data-mark-duplicate="${line.id}:${m.id}" ${busy ? "disabled" : ""}>Mark as Duplicate</button></td>
+            </tr>`
+            )
+            .join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
   function detailHtml(line) {
     const days = daysPending(line.orders?.order_date);
     return `
@@ -275,6 +401,8 @@ export async function renderPendingCommission(container, ctx) {
 
             <h4>Commission report lookup</h4>
             ${reportLookupHtml(line)}
+
+            ${duplicateLookupHtml(line)}
 
             <h4>Decision</h4>
             <label class="field-label" for="pc-note-${line.id}">Note</label>
@@ -331,9 +459,11 @@ export async function renderPendingCommission(container, ctx) {
         <p class="muted">
           All order lines currently waiting on a commission report, except lines already tracked on the Missing
           Commission screen -- review those there instead. Click a row for full detail -- expected commission,
-          ordered service, and a live lookup of any commission report already uploaded for that account -- then choose
-          Keep Pending, Mark Received, or Confirmed Missing. Only "Confirmed Missing" sends a line to the Missing
-          Commission follow-up list; the "21+ days" badge below is just a visual warning, nothing moves automatically.
+          ordered service, a live lookup of any commission report already uploaded for that account, and a check for
+          another customer record (same name + phone) that already has this same commission recorded -- then choose
+          Keep Pending, Mark Received, Confirmed Missing, or (when a duplicate customer record is found) Mark as
+          Duplicate. Only "Confirmed Missing" sends a line to the Missing Commission follow-up list; the "21+ days"
+          badge below is just a visual warning, nothing moves automatically.
         </p>
 
         ${loadError ? `<div class="alert error">Failed to load: ${escapeHtml(loadError)}</div>` : ""}
@@ -410,6 +540,9 @@ export async function renderPendingCommission(container, ctx) {
       const key = line ? normalizeAccountNumber(line.account_number) : "";
       if (line && key && !reportLookupCache.has(key)) {
         lookupReport(line.account_number).then(() => draw());
+      }
+      if (line && !duplicateLookupCache.has(line.id)) {
+        lookupPossibleDuplicate(line).then(() => draw());
       }
     }
   }
@@ -555,6 +688,43 @@ export async function renderPendingCommission(container, ctx) {
           draw();
           return;
         }
+      });
+    });
+
+    container.querySelectorAll("[data-mark-duplicate]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const [id, siblingId] = btn.dataset.markDuplicate.split(":");
+        const line = lines.find((l) => l.id === id);
+        const cached = duplicateLookupCache.get(id);
+        const sibling = cached?.matches?.find((m) => m.id === siblingId);
+        if (!line || !sibling) return;
+
+        const label = `${line.orders?.customers?.name || "this line"} -- ${line.plan_name || ""} (${fmtMoney(line.expected_commission)})`;
+        const siblingLabel = `account ${sibling.account_number || "-"}, ${sibling.plan_name || "-"}, ${sibling.status} ${fmtMoney(sibling.actual_commission_amount)} on ${sibling.orders?.order_date || "-"}`;
+        if (
+          !confirm(
+            `Mark "${label}" as a duplicate of the already-processed line (${siblingLabel})? This removes it from Pending Commission -- it never changes the sibling line's received amount, and this line's own expected commission is never counted as received.`
+          )
+        )
+          return;
+
+        busy = true;
+        draw();
+        const note = `Duplicate of order_service_lines ${sibling.id} (account ${sibling.account_number || "-"}, ${sibling.plan_name || "-"}, ${sibling.status} ${fmtMoney(sibling.actual_commission_amount)} on ${sibling.orders?.order_date || "-"}). ${noteDraft.trim()}`.trim();
+        const { error } = await supabase
+          .from("order_service_lines")
+          .update({
+            status: "duplicate",
+            resolution_note: note,
+            resolution_at: new Date().toISOString(),
+            resolution_by: ctx.profile?.id || null,
+          })
+          .eq("id", id);
+        busy = false;
+        if (error) alert("Failed to mark as duplicate: " + error.message);
+        expandedId = null;
+        await load();
+        draw();
       });
     });
   }

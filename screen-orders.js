@@ -18,6 +18,7 @@ function commissionBadge(status) {
   if (status === "mismatch") return `<span class="badge error">Commission Mismatch</span>`;
   if (status === "no_report") return `<span class="badge neutral">No Report</span>`;
   if (status === "missing") return `<span class="badge error">Missing</span>`;
+  if (status === "duplicate") return `<span class="badge neutral">Duplicate (see linked line)</span>`;
   return `<span class="badge warn">Pending</span>`;
 }
 
