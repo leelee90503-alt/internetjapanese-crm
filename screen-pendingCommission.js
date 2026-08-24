@@ -29,11 +29,16 @@ import { escapeHtml, fmtMoney, normalizeAccountNumber, normalizePhone } from "./
 // This replaces the old "Flag as Missing" button, which used to create a
 // missing_commission_items row -- that table is now legacy-only.
 //
-// Duplicate-customer detection: on expand, each line is also checked against
-// other customer records sharing the same phone number (the same heuristic
-// duplicateCheck.js already uses on new uploads) to proactively surface the
-// "this customer already has a received line under a different, mismatched
-// account number" pattern -- see checkPossibleDuplicate() below.
+// Duplicate detection: on expand, each line is checked two independent ways
+// (either is enough to surface a warning, since legacy-import rows are
+// inconsistent about which fields survived intact) -- see
+// lookupPossibleDuplicate() below:
+//   1. Same name + phone on a different customer record (the same heuristic
+//      duplicateCheck.js already uses on new uploads).
+//   2. A near-identical account number (Levenshtein distance, or one number
+//      containing the other) on the same provider with a nearby order date --
+//      catches rows where the legacy import also mangled/reordered the name
+//      or dropped the phone number, so signal 1 alone would miss them.
 
 const PAGE_SIZE = 50;
 
@@ -124,7 +129,7 @@ export async function renderPendingCommission(container, ctx) {
     const { data, error } = await supabase
       .from("order_service_lines")
       .select(
-        "id, account_number, plan_name, expected_commission, order_id, providers(name), orders(order_date, order_number, customer_id, customers(name, address, phone))"
+        "id, account_number, plan_name, expected_commission, order_id, provider_id, providers(name), orders(order_date, order_number, customer_id, customers(name, address, phone))"
       )
       .eq("status", "pending")
       .order("order_id", { ascending: true })
@@ -156,46 +161,85 @@ export async function renderPendingCommission(container, ctx) {
     return result;
   }
 
-  // Looks for OTHER customer records (different customer id) sharing this
-  // line's phone number, and if found, pulls any of their order_service_lines
-  // that are NOT still pending -- i.e. already received/mismatch/no_report.
-  // This is the same "name+phone match" signal duplicateCheck.js already uses
-  // to warn about possible duplicates during new customer uploads; here it
-  // runs retroactively against already-pending lines so a leftover duplicate
-  // (most commonly a "[Legacy import]" row with a garbled account number)
-  // gets surfaced instead of sitting in Pending Commission forever.
+  // Splits a name into lowercase word tokens for order-independent
+  // comparison -- legacy-import rows are inconsistent about name order
+  // ("TOMIKAWA YOSHIMITSU" vs "Yoshimitsu Tomikawa" for the same person), so
+  // a plain string/ilike comparison misses these pairs entirely.
+  function nameTokens(name) {
+    return (name || "")
+      .toLowerCase()
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .sort();
+  }
+
+  function sameTokenSet(a, b) {
+    if (a.length === 0 || b.length !== a.length) return false;
+    return a.every((t, i) => t === b[i]);
+  }
+
+  // Looks for another order_service_lines row that is very likely the same
+  // real customer's already-processed commission, using a name match that
+  // ignores word order and requires an exact phone match when both sides
+  // have a phone on file:
+  //
+  //   - Same set of name words, in any order, on a DIFFERENT customer
+  //     record -- catches legacy-import rows recorded "LASTNAME FIRSTNAME"
+  //     against the real order recorded "Firstname Lastname" (or vice
+  //     versa), which a plain string/ilike comparison misses entirely.
+  //   - If BOTH customer records have a phone number, it must match too
+  //     (this is the same signal duplicateCheck.js already uses on new
+  //     uploads). If either side has no phone on file -- common for
+  //     "[Legacy import]" rows -- the name-token match alone is used; a
+  //     shared name is still a strong enough signal to warrant a look,
+  //     given the account number and product/date are shown right there
+  //     for the admin to visually confirm before clicking "Mark as
+  //     Duplicate".
+  //
+  // (An earlier version of this check also tried flagging "near-identical"
+  // account numbers on a nearby order date, but Spectrum's account numbers
+  // turned out to be assigned close together for unrelated customers too --
+  // that check produced false positives at the same edit distance as real
+  // duplicates, so it was dropped in favor of the name-token signal above.)
   async function lookupPossibleDuplicate(line) {
     const cacheKey = line.id;
     if (duplicateLookupCache.has(cacheKey)) return duplicateLookupCache.get(cacheKey);
+    duplicateLookupCache.set(cacheKey, { status: "loading", matches: [] });
 
-    const phone = normalizePhone(line.orders?.customers?.phone);
     const name = line.orders?.customers?.name;
     const myCustomerId = line.orders?.customer_id;
-    if (!phone || !name || !myCustomerId) {
+    const myPhone = normalizePhone(line.orders?.customers?.phone);
+    const myTokens = nameTokens(name);
+    if (myTokens.length === 0 || !myCustomerId) {
       const result = { status: "done", matches: [] };
       duplicateLookupCache.set(cacheKey, result);
       return result;
     }
 
-    duplicateLookupCache.set(cacheKey, { status: "loading", matches: [] });
-
-    // Narrow the customers scan by name (ilike) rather than pulling the whole
-    // table, then confirm the phone match client-side after normalizing --
-    // phone formatting varies row to row (dashes, spaces, none).
-    const { data: sameNameCustomers, error: custErr } = await supabase
+    // Narrow the customers scan with an ilike on the shortest word (cheapest
+    // to be selective enough), then confirm the full token set client-side --
+    // Postgres ilike can't do "same words in either order" on its own.
+    const shortestToken = myTokens.reduce((a, b) => (b.length < a.length ? b : a));
+    const { data: candidates, error: custErr } = await supabase
       .from("customers")
       .select("id, name, phone")
-      .ilike("name", name.trim())
-      .limit(20);
-
+      .ilike("name", `%${shortestToken}%`)
+      .limit(50);
     if (custErr) {
       const result = { status: "error", matches: [], error: custErr.message };
       duplicateLookupCache.set(cacheKey, result);
       return result;
     }
 
-    const otherCustomerIds = (sameNameCustomers || [])
-      .filter((c) => c.id !== myCustomerId && normalizePhone(c.phone) === phone)
+    const otherCustomerIds = (candidates || [])
+      .filter((c) => c.id !== myCustomerId && sameTokenSet(myTokens, nameTokens(c.name)))
+      .filter((c) => {
+        const cPhone = normalizePhone(c.phone);
+        // Require a phone match only when both sides actually have one on file.
+        if (myPhone && cPhone) return myPhone === cPhone;
+        return true;
+      })
       .map((c) => c.id);
 
     if (otherCustomerIds.length === 0) {
@@ -212,14 +256,19 @@ export async function renderPendingCommission(container, ctx) {
       .in("orders.customer_id", otherCustomerIds)
       .neq("status", "pending")
       .neq("status", "duplicate");
-
     if (lineErr) {
       const result = { status: "error", matches: [], error: lineErr.message };
       duplicateLookupCache.set(cacheKey, result);
       return result;
     }
 
-    const result = { status: "done", matches: siblingLines || [] };
+    const matches = (siblingLines || []).map((m) => {
+      const cPhone = normalizePhone(m.orders?.customers?.phone);
+      const reason = myPhone && cPhone ? "Same name (any word order) + phone" : "Same name (any word order), no phone on file to cross-check";
+      return { ...m, matchReason: reason };
+    });
+
+    const result = { status: "done", matches };
     duplicateLookupCache.set(cacheKey, result);
     return result;
   }
@@ -351,13 +400,13 @@ export async function renderPendingCommission(container, ctx) {
     }
     return `
       <div class="alert warn">
-        <strong>Possible duplicate:</strong> another customer record with the same name + phone number
-        (${escapeHtml(line.orders?.customers?.name || "-")}, ${escapeHtml(line.orders?.customers?.phone || "-")})
-        already has commission recorded below. If this is the same real order, use "Mark as Duplicate" instead of
-        chasing the provider for a commission that was already paid.
+        <strong>Possible duplicate:</strong> another order line below looks like the same real order already has
+        commission recorded. If this is the same real order, use "Mark as Duplicate" instead of chasing the provider
+        for a commission that was already paid. Double-check the "Why flagged" column before confirming -- a
+        near-identical account number match is a strong signal, but always compare customer/plan/date yourself.
       </div>
       <table class="data-table small">
-        <thead><tr><th>Account #</th><th>Plan</th><th>Status</th><th>Amount</th><th>Order Date</th><th></th></tr></thead>
+        <thead><tr><th>Account #</th><th>Plan</th><th>Status</th><th>Amount</th><th>Order Date</th><th>Why flagged</th><th></th></tr></thead>
         <tbody>
           ${cached.matches
             .map(
@@ -368,6 +417,7 @@ export async function renderPendingCommission(container, ctx) {
               <td>${escapeHtml(m.status || "-")}</td>
               <td>${fmtMoney(m.actual_commission_amount)}</td>
               <td>${escapeHtml(m.orders?.order_date || "-")}</td>
+              <td class="muted">${escapeHtml(m.matchReason || "-")}</td>
               <td><button class="btn small danger" data-mark-duplicate="${line.id}:${m.id}" ${busy ? "disabled" : ""}>Mark as Duplicate</button></td>
             </tr>`
             )
