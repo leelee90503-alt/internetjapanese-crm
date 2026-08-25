@@ -1,5 +1,5 @@
 import { supabase } from "./supabaseClient.js";
-import { renderAuthScreen } from "./auth.js";
+import { renderAuthScreen, renderSetNewPasswordScreen } from "./auth.js";
 import { renderDashboard } from "./screen-dashboard.js";
 import { renderMasterData } from "./screen-masterData.js";
 import { renderCustomerUpload } from "./screen-customerUpload.js";
@@ -55,6 +55,11 @@ const root = document.getElementById("app");
 let session = null;
 let profile = null;
 let expandedGroups = new Set();
+// Set true when Supabase detects a password-recovery link in the URL (the
+// user clicked the "reset password" email). While true, renderApp() shows
+// the set-new-password screen instead of the normal login/dashboard flow,
+// regardless of session state.
+let showPasswordReset = false;
 
 async function loadProfile() {
   const {
@@ -107,6 +112,16 @@ function renderNav(route, isAdmin) {
 }
 
 async function renderApp() {
+  if (showPasswordReset) {
+    renderSetNewPasswordScreen(root, {
+      onDone: async () => {
+        showPasswordReset = false;
+        await bootAfterLogin();
+      },
+    });
+    return;
+  }
+
   if (!session) {
     renderAuthScreen(root, {
       onAuthed: async () => {
@@ -184,8 +199,12 @@ async function bootAfterLogin() {
 
 window.addEventListener("hashchange", renderApp);
 
-supabase.auth.onAuthStateChange((_event, s) => {
+supabase.auth.onAuthStateChange((event, s) => {
   session = s;
+  if (event === "PASSWORD_RECOVERY") {
+    showPasswordReset = true;
+    renderApp();
+  }
 });
 
 (async function init() {
